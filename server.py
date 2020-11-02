@@ -5,12 +5,14 @@ from asyncio.streams import StreamReader, StreamWriter
 from dataclasses import dataclass
 from typing import Optional, Set
 
+import aiohttp
 import asyncio
 # pylint: disable=import-error
 import click
 # pylint: enable=import-error
 import enum
 import ipaddress
+import json
 import logging
 import socket
 import struct
@@ -69,8 +71,8 @@ class ConnectionInfo:
 class ServerConfig:
     host: str
     port: int
-    username: str
-    password: str
+    username: Optional[str]
+    password: Optional[str]
     validator: Optional[str]
     ca_file: Optional[str]
 
@@ -90,15 +92,15 @@ class ProxyConnection:
         await self.writer.drain()
 
     async def authenticate(self, methods: Set[Method]) -> None:
-        if Method.user_pass in methods:
+        if Method.user_pass in methods and self.config.username and self.config.password:
             await self.use_auth_method(Method.user_pass)
-            log.info("auth_check_creds")
+            log.info("Using username / password authentication")
             await self.check_credentials()
-        elif Method.no_auth in methods:
+        elif Method.no_auth in methods and not self.config.username and not self.config.password:
             await self.use_auth_method(Method.no_auth)
-            log.info("Using no auth method")
+            log.info("Using no authentication method")
         else:
-            log.error("No usable auth methods found")
+            log.error("No usable auth methods found for given config")
             await self.use_auth_method(Method.no_acceptable_methods)
             raise HandshakeError(f"Unknown method {methods}")
 
@@ -108,13 +110,18 @@ class ProxyConnection:
         return True
 
     async def process_request(self) -> None:
-        log.info("get_version")
-        methods = await self.get_auth_methods()
-        await self.authenticate(methods)
-        connection_info = await self.get_dest_info()
-        if not await self.validate_request_data(connection_info):
-            log.error("Could not validate connection info")
-            # TODO -> close the stream here
+        try:
+            log.info("get_version")
+            methods = await self.get_auth_methods()
+            await self.authenticate(methods)
+            connection_info = await self.get_dest_info()
+            if not await self.validate_request_data(connection_info):
+                log.error("Could not validate connection info")
+                # TODO -> close the stream here
+        except HandshakeError as e:
+            log.error("Error during client handshake: %r", e)
+            await self.close_all()
+            return
         log.info(
             "Got host data: %r:%r and command %r",
             connection_info.address,
@@ -136,19 +143,20 @@ class ProxyConnection:
         self.writer.write(SOCKS5_VER + reply + RSV + connection_info.address_type + connection_info.address_data)
         await self.writer.drain()
 
-    async def copy_data(self, src: StreamReader, dst: StreamWriter, done: asyncio.Event):
+    @staticmethod
+    async def copy_data(src: StreamReader, dst: StreamWriter, done: asyncio.Event, name: str):
         while True:
             data = await src.read(2048)
-            if data == b"" or src.at_eof():
+            if src.at_eof():
                 done.set()
-                log.info("Source connection closed")
+                log.info("%s: connection closed", name)
                 break
             if done.is_set():
-                log.info("Connection terminated, writing remaining data and bailing")
+                log.info("%s: connection terminated, writing remaining data and bailing", name)
                 dst.write(data)
                 break
             dst.write(data)
-            log.info("Wrote %d bytes to %s", len(data), self.writer.get_extra_info("peername"))
+            log.info("%s: wrote %d bytes", name, len(data))
 
     async def handle_connect(self, connection_info: ConnectionInfo) -> None:
         # connect
@@ -162,10 +170,10 @@ class ProxyConnection:
             dst_addr = connection_info.address
             event = asyncio.Event()
             self.loop.create_task(
-                self.copy_data(dst=self.writer, src=self.dst_reader, done=event), name=f"{dst_addr} -> {src_addr}"
+                self.copy_data(dst=self.writer, src=self.dst_reader, done=event, name=f"{dst_addr} -> {src_addr}")
             )
             self.loop.create_task(
-                self.copy_data(dst=self.dst_writer, src=self.reader, done=event), name=f"{src_addr} -> {dst_addr}"
+                self.copy_data(dst=self.dst_writer, src=self.reader, done=event, name=f"{src_addr} -> {dst_addr}")
             )
             await event.wait()
         except OSError:
@@ -178,6 +186,7 @@ class ProxyConnection:
         for wr in [self.writer, self.dst_writer]:
             if wr is None:
                 continue
+            log.info("Closing connection to %r", wr.get_extra_info("peername"))
             wr.write_eof()
             await wr.drain()
             wr.close()
@@ -185,7 +194,7 @@ class ProxyConnection:
 
     async def get_auth_methods(self) -> Set[Method]:
         data = await self.reader.read(1)
-        if not data or data[0] != SOCKS5_VER:
+        if not data or data != SOCKS5_VER:
             raise HandshakeError(f"Socks version {data[0]} not supported")
         log.info("Read version byte")
         data = await self.reader.read(1)
@@ -196,7 +205,8 @@ class ProxyConnection:
             # version, count, then one byte each method
             raise HandshakeError("Not enough data to identify methods")
         for i in range(method_count):
-            filtered = {m for m in Method if data[i] == m.value}
+            log.error("Got %r, %r", data[i], type(data[i]))
+            filtered = {m for m in Method if struct.pack("B", data[i]) == m.value}
             if filtered:
                 methods = methods.union(filtered)
         log.info("Got connection methods: %r", methods)
@@ -204,8 +214,8 @@ class ProxyConnection:
 
     async def check_credentials(self) -> None:
         # https://tools.ietf.org/html/rfc1929
-        user_auth_version, = struct.unpack("B", await self.reader.read(1))
-        if user_auth_version != 1:
+        user_auth_version = await self.reader.read(1)
+        if user_auth_version != b"\x01":
             self.writer.write(b"\x01\x01")
             raise HandshakeError("Faulty user auth version: %r", user_auth_version)
         user_len, = struct.unpack("B", await self.reader.read(1))
@@ -219,11 +229,31 @@ class ProxyConnection:
             self.writer.write(b"\x01\x01")
             raise HandshakeError("Invalid username and/or password")
         self.writer.write(b"\x01\x00")
-        log.info("Pretending %s:%s are ok", user, password)
 
     async def auth_ok(self, username: str, password: str) -> bool:
         if not self.config.validator:
+            log.info("Performing local credential validation")
             return username == self.config.username and password == self.config.password
+        else:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "type": "external_auth",
+                    "username": username,
+                    "password": password,
+                }
+                async with session.post(self.config.validator, json=payload) as resp:
+                    if not resp.ok:
+                        log.error("Invalid status code: %r", resp.status)
+                        return False
+                    try:
+                        data = await resp.json()
+                        if "decision" not in data or data["decision"] != "authenticated":
+                            log.error("Invalid response")
+                            return False
+                    except json.JSONDecodeError:
+                        log.error("Response data is not valid json")
+                        return False
+
         return False
 
     async def get_dest_info(self) -> ConnectionInfo:
@@ -231,16 +261,16 @@ class ProxyConnection:
         # |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
         # +----+-----+-------+------+----------+----------+
         data = await self.reader.read(4)
-        if not data[0] != SOCKS5_VER:
+        if not bytes(data[0]) != SOCKS5_VER:
             raise HandshakeError(f"Invalid protocol version: {data[0]}")
         try:
-            command = Command(data[1])
+            command = Command(struct.pack("B", data[1]))
         except ValueError:
             raise HandshakeError(f"Unknown command")
-        if not data[2] == RSV:
+        if not struct.pack("B", data[2]) == RSV:
             raise HandshakeError(f"Reserved byte should be 0 and is: {data[2]}")
         try:
-            addr_type = AddressType(data[3])
+            addr_type = AddressType(struct.pack("B", data[3]))
         except ValueError:
             raise HandshakeError(f"Invalid address type: {data[3]}")
         # ipv4
@@ -249,25 +279,24 @@ class ProxyConnection:
             addr_bytes = await self.reader.read(4)
             ip_addr = str(ipaddress.ip_address(addr_bytes))
             port_bytes = await self.reader.read(2)
-            port = struct.unpack(">H", port_bytes)
+            port, = struct.unpack(">H", port_bytes)
         elif addr_type is AddressType.ipv6:
             log.info("Parsing IPV6 addr type")
             addr_bytes = await self.reader.read(16)
             ip_addr = str(ipaddress.ip_address(addr_bytes))
             port_bytes = await self.reader.read(2)
-            port = struct.unpack(">H", port_bytes)
+            port, = struct.unpack(">H", port_bytes)
         elif addr_type is AddressType.fqdn:
             log.info("Parsing FQDN addr type")
             addr_len_byte = await self.reader.read(1)
-            addr_len, _ = struct.unpack("B", addr_len_byte)
+            addr_len, = struct.unpack("B", addr_len_byte)
             addr_str = await self.reader.read(addr_len)
             addr_bytes = addr_len_byte + addr_str
             port_bytes = await self.reader.read(2)
-            port, _ = struct.unpack(">H", port_bytes)
+            port, = struct.unpack(">H", port_bytes)
             addr_info = socket.getaddrinfo(addr_str, None)
             if not addr_info:
                 raise HandshakeError(f"Could not decode adddres info from {data}")
-            # take the first element of the tuple
             ip_addr = addr_info[0][-1][0]
         else:
             raise HandshakeError(f"Invalid address type: {addr_type}")
@@ -286,11 +315,12 @@ def conn_factory(config: ServerConfig):
     async def proxy(reader: StreamReader, writer: StreamWriter) -> None:
         conn = ProxyConnection(reader=reader, writer=writer, config=config)
         await conn.process_request()
+        log.info("Done processing request")
 
     return proxy
 
 
-async def run(username: str, password: str, validator: Optional[str], cafile: Optional[str], host: str, port: int):
+async def run(username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int):
     config = ServerConfig(
         host=host,
         port=int(port),
@@ -311,13 +341,11 @@ async def run(username: str, password: str, validator: Optional[str], cafile: Op
 @click.command()
 @click.option('--port', default=1080, help="Server port")
 @click.option('--host', default="0.0.0.0", help="Network interface")
-@click.option('--username', help="Username")
-@click.option('--password', help="Password")
+@click.option('--username', default=None, help="Username for user/pass auth")
+@click.option('--password', default=None, help="Password for user/pass auth")
 @click.option('--validator', default=None, help="External validator url")
 @click.option('--cafile', default=None, help="Validate certificate")
-def main(username: str, password: str, validator: Optional[str], cafile: Optional[str], host: str, port: int):
-    assert password is not None, "Password cannot be empty"
-    assert username is not None, "Username cannot be empty"
+def main(username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int):
     asyncio.run(run(
         username=username,
         host=host,
