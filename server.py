@@ -2,6 +2,7 @@
     http://www.faqs.org/rfcs/rfc1928.html
 """
 import asyncio
+import click
 import enum
 import ipaddress
 import logging
@@ -16,10 +17,6 @@ SOCKS5_VER = b"\x05"
 RSV = b"\x00"
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)
-
-
-class HandshakeError(Exception):
-    pass
 
 
 class AddressType(bytes, enum.Enum):
@@ -51,6 +48,10 @@ class CommandReplyStatus(bytes, enum.Enum):
     ttl_expired = b"\x06"
     command_not_supported = b"\x07"
     address_type_unsupported = b"\x08"
+
+
+class HandshakeError(Exception):
+    pass
 
 
 @dataclass
@@ -276,13 +277,7 @@ def conn_factory(config: ServerConfig):
     return proxy
 
 
-async def main():
-    host = "0.0.0.0"
-    port = 1080
-    username = "foo"
-    password = "foopass"
-    validator = None
-    cafile = None
+async def run(username: str, password: str, validator: Optional[str], cafile: Optional[str], host: str, port: int):
     config = ServerConfig(
         host=host,
         port=int(port),
@@ -291,13 +286,34 @@ async def main():
         validator=validator,
         ca_file=cafile,
     )
+    log.debug("Got config: %r", config)
     loop = asyncio.get_running_loop()
     server = await asyncio.start_server(conn_factory(config), host=config.host, port=config.port, loop=loop)
     addr = server.sockets[0].getsockname()
-    print(f"serving on {addr}")
+    log.info("Serving on %s", addr)
     async with server:
         await server.serve_forever()
 
 
+@click.command()
+@click.option('--port', default=1080, help="Server port")
+@click.option('--host', default="0.0.0.0", help="Network interface")
+@click.option('--username', help="Username")
+@click.option('--password', help="Password")
+@click.option('--validator', default=None, help="External validator url")
+@click.option('--cafile', default=None, help="Validate certificate")
+def main(username: str, password: str, validator: Optional[str], cafile: Optional[str], host: str, port: int):
+    assert password is not None, "Password cannot be empty"
+    assert username is not None, "Username cannot be empty"
+    asyncio.run(run(
+        username=username,
+        host=host,
+        port=port,
+        password=password,
+        validator=validator,
+        cafile=cafile,
+    ))
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
