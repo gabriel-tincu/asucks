@@ -320,7 +320,9 @@ def conn_factory(config: ServerConfig):
     return proxy
 
 
-async def run(username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int):
+async def run(
+    username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int
+):
     config = ServerConfig(
         host=host,
         port=int(port),
@@ -345,7 +347,9 @@ async def run(username: Optional[str], password: Optional[str], validator: Optio
 @click.option('--password', default=None, help="Password for user/pass auth")
 @click.option('--validator', default=None, help="External validator url")
 @click.option('--cafile', default=None, help="Validate certificate")
-def main(username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int):
+def main(
+    username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int
+):
     asyncio.run(run(
         username=username,
         host=host,

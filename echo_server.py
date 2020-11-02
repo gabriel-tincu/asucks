@@ -1,5 +1,6 @@
-import asyncio
 from asyncio.streams import StreamReader, StreamWriter
+
+import asyncio
 
 
 async def echo(reader: StreamReader, writer: StreamWriter) -> None:
@@ -15,6 +16,7 @@ async def run():
     server = await asyncio.start_server(echo, host="0.0.0.0", port=6666, loop=loop)
     async with server:
         await server.serve_forever()
+
 
 if __name__ == "__main__":
     asyncio.run(run())
