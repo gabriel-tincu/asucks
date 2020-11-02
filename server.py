@@ -203,17 +203,28 @@ class ProxyConnection:
         return methods
 
     async def check_credentials(self) -> None:
+        # https://tools.ietf.org/html/rfc1929
         user_auth_version, = struct.unpack("B", await self.reader.read(1))
         if user_auth_version != 1:
-            raise HandshakeError(f"Faulty user auth version: {user_auth_version}")
+            self.writer.write(b"\x01\x01")
+            raise HandshakeError("Faulty user auth version: %r", user_auth_version)
         user_len, = struct.unpack("B", await self.reader.read(1))
         user = (await self.reader.read(user_len)).decode()
         pass_len, = struct.unpack("B", await self.reader.read(1))
-        password = (await self.reader.read(pass_len)).decode
-        # TODO -> auth code here
-        # user auth succeeded
+        password = (await self.reader.read(pass_len)).decode()
+        if pass_len != len(password) or user_len != len(user):
+            self.writer.write(b"\x01\x01")
+            raise HandshakeError("Username / Password sizes do not match")
+        if not await self.auth_ok(user, password):
+            self.writer.write(b"\x01\x01")
+            raise HandshakeError("Invalid username and/or password")
         self.writer.write(b"\x01\x00")
         log.info("Pretending %s:%s are ok", user, password)
+
+    async def auth_ok(self, username: str, password: str) -> bool:
+        if not self.config.validator:
+            return username == self.config.username and password == self.config.password
+        return False
 
     async def get_dest_info(self) -> ConnectionInfo:
         # +----+-----+-------+------+----------+----------+
