@@ -7,3 +7,15 @@ This is still very much a work in progress but the aim goal is to
 - Add unit tests or maybe dockerised systests 
 - Add a dockerfile plus instructions
 
+## Usage
+
+```shell script
+$ git clone https://github.com/gabriel-tincu/asucks
+$ cd asucks
+$ virtualenv .venv
+$ source .venv/bin/activate
+$ pip install -r requirements.txt
+$ python -m server --host 127.0.0.1 --port 1080
+```
+
+
