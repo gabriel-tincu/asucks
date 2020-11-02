@@ -11,5 +11,5 @@ This is still very much a work in progress but the aim goal is to
 
 ```shell script
 $ pip install asucks
-$ python -m server --host 127.0.0.1 --port 1080
+$ python -m asucks.server --host 127.0.0.1 --port 1080
 ```

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "asucks"
-version = "0.1.0"
+version = "0.2.0"
 description = "SOCKS5 async python server"
 authors = ["Gabriel Tincu <gabi@aiven.io>"]
 
