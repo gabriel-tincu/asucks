@@ -1,17 +1,19 @@
 """
     http://www.faqs.org/rfcs/rfc1928.html
 """
+from asyncio.streams import StreamReader, StreamWriter
+from dataclasses import dataclass
+from typing import Optional, Set
+
 import asyncio
+# pylint: disable=import-error
 import click
+# pylint: enable=import-error
 import enum
 import ipaddress
 import logging
 import socket
 import struct
-
-from asyncio.streams import StreamWriter, StreamReader
-from dataclasses import dataclass
-from typing import Optional, Set
 
 SOCKS5_VER = b"\x05"
 RSV = b"\x00"
@@ -315,5 +317,6 @@ def main(username: str, password: str, validator: Optional[str], cafile: Optiona
     ))
 
 
+# pylint: disable=no-value-for-parameter
 if __name__ == "__main__":
     main()
