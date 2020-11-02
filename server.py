@@ -2,7 +2,6 @@
     http://www.faqs.org/rfcs/rfc1928.html
 """
 import asyncio
-import click
 import enum
 import ipaddress
 import logging
@@ -13,7 +12,8 @@ from asyncio.streams import StreamWriter, StreamReader
 from dataclasses import dataclass
 from typing import Optional, Set
 
-SOCKS5_VER = b'\x05'
+SOCKS5_VER = b"\x05"
+RSV = b"\x00"
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)
 
@@ -39,6 +39,18 @@ class Command(bytes, enum.Enum):
     connect = b"\x01"
     bind = b"\x02"
     udp = b"\x03"
+
+
+class CommandReplyStatus(bytes, enum.Enum):
+    succeeded = b"\x00"
+    general_failure = b"\x01"
+    conn_not_allower = b"\x02"
+    network_unreachable = b"\x03"
+    host_unreachable = b"\x04"
+    connection_refused = b"\x05"
+    ttl_expired = b"\x06"
+    command_not_supported = b"\x07"
+    address_type_unsupported = b"\x08"
 
 
 @dataclass
@@ -71,13 +83,7 @@ class ProxyConnection:
         self.loop = asyncio.get_running_loop()
 
     async def use_auth_method(self, method: Method) -> None:
-        # version + no auth
         self.writer.write(SOCKS5_VER + method.value)
-        await self.writer.drain()
-
-    async def use_user_auth(self) -> None:
-        # version + user / pass auth
-        self.writer.write(SOCKS5_VER + b'\x02')
         await self.writer.drain()
 
     async def authenticate(self, methods: Set[Method]) -> None:
@@ -93,61 +99,92 @@ class ProxyConnection:
             await self.use_auth_method(Method.no_acceptable_methods)
             raise HandshakeError(f"Unknown method {methods}")
 
+    @staticmethod
+    async def validate_request_data(connection_info) -> bool:
+        log.info("Validating %s", connection_info.address)
+        return True
+
     async def process_request(self) -> None:
         log.info("get_version")
-        methods = await self.get_version_and_methods()
+        methods = await self.get_auth_methods()
         await self.authenticate(methods)
         connection_info = await self.get_dest_info()
+        if not await self.validate_request_data(connection_info):
+            log.error("Could not validate connection info")
+            # TODO -> close the stream here
         log.info(
             "Got host data: %r:%r and command %r",
             connection_info.address,
             connection_info.port,
             connection_info.command,
         )
+        if connection_info.command is Command.connect:
+            await self.handle_connect(connection_info)
+        else:
+            await self.send_command_reply(connection_info, CommandReplyStatus.command_not_supported)
+            await self.close_all()
 
-    @staticmethod
-    async def copy_data(src: StreamReader, dst: StreamWriter):
+    async def send_command_reply(self, connection_info: ConnectionInfo, reply: CommandReplyStatus) -> None:
+        # +-----+------+------+------+----------+----------+
+        # | VER |  REP |  RSV | ATYP | BND.ADDR | BND.PORT |
+        # +-----+------+------+------+----------+----------+
+        # |  1  |  1   | X'00'|   1  | Variable |   2      |
+        # +-----+------+------+------+----------+----------+
+        self.writer.write(SOCKS5_VER + reply + RSV + connection_info.address_type + connection_info.address_data)
+        await self.writer.drain()
+
+    async def copy_data(self, src: StreamReader, dst: StreamWriter, done: asyncio.Event):
         while True:
             data = await src.read(2048)
-            if data == b"":
+            if data == b"" or src.at_eof():
+                done.set()
                 log.info("Source connection closed")
-                dst.write_eof()
-                await dst.drain()
-                dst.close()
-                await dst.wait_closed()
+                break
+            if done.is_set():
+                log.info("Connection terminated, writing remaining data and bailing")
+                dst.write(data)
                 break
             dst.write(data)
+            log.info("Wrote %d bytes to %s", len(data), self.writer.get_extra_info("peername"))
 
-    async def handle_command(self, connection_info: ConnectionInfo) -> None:
+    async def handle_connect(self, connection_info: ConnectionInfo) -> None:
         # connect
-        if connection_info.command == 1:
-            try:
-                self.dst_reader, self.dst_writer = await asyncio.open_connection(
-                    connection_info.address, connection_info.port, loop=self.loop
-                )
-                # VERSION RESP RESERVED ADDR_TYP ADDR_PAYLOAD
-                #    5     1      0
-                self.writer.write(
-                    b"5" + struct.pack("B", connection_info.command) + b"\x00" +
-                    struct.pack("B", connection_info.address_type) + connection_info.address_data
-                )
-                self.loop.create_task()
-            except Exception:
-                log.exception(
-                    "Could not open destination connection to %r:%r", connection_info.address, connection_info.port
-                )
-                self.writer.close()
-                # don't swallow.... reply back to the client and close the reader and writer
+        try:
+            self.dst_reader, self.dst_writer = await asyncio.open_connection(
+                connection_info.address, connection_info.port, loop=self.loop
+            )
 
-    async def get_version_and_methods(self) -> Set[Method]:
-        log.info("reading...")
+            await self.send_command_reply(connection_info, CommandReplyStatus.succeeded)
+            src_addr = self.writer.get_extra_info("peername")
+            dst_addr = connection_info.address
+            event = asyncio.Event()
+            self.loop.create_task(
+                self.copy_data(dst=self.writer, src=self.dst_reader, done=event), name=f"{dst_addr} -> {src_addr}"
+            )
+            self.loop.create_task(
+                self.copy_data(dst=self.dst_writer, src=self.reader, done=event), name=f"{src_addr} -> {dst_addr}"
+            )
+            await event.wait()
+        except OSError:
+            log.exception("Could not open destination connection to %r:%r", connection_info.address, connection_info.port)
+            await self.send_command_reply(connection_info, CommandReplyStatus.general_failure)
+        finally:
+            await self.close_all()
+
+    async def close_all(self):
+        for wr in [self.writer, self.dst_writer]:
+            if wr is None:
+                continue
+            wr.write_eof()
+            await wr.drain()
+            wr.close()
+            await wr.wait_closed()
+
+    async def get_auth_methods(self) -> Set[Method]:
         data = await self.reader.read(1)
-        version = int(data[0])
-        # socks5 only
-        if version != 5:
-            raise HandshakeError(f"Socks version {version} not supported")
-        else:
-            log.info("Read version byte")
+        if not data or data[0] != SOCKS5_VER:
+            raise HandshakeError(f"Socks version {data[0]} not supported")
+        log.info("Read version byte")
         data = await self.reader.read(1)
         method_count = int(data[0])
         data = await self.reader.read(method_count)
@@ -156,7 +193,7 @@ class ProxyConnection:
             # version, count, then one byte each method
             raise HandshakeError("Not enough data to identify methods")
         for i in range(method_count):
-            filtered = {m for m in Method if data[m] == m.value}
+            filtered = {m for m in Method if data[i] == m.value}
             if filtered:
                 methods = methods.union(filtered)
         log.info("Got connection methods: %r", methods)
@@ -173,7 +210,7 @@ class ProxyConnection:
         # TODO -> auth code here
         # user auth succeeded
         self.writer.write(b"\x01\x00")
-        log.info(f"Pretending %s:%s are ok", user, password)
+        log.info("Pretending %s:%s are ok", user, password)
 
     async def get_dest_info(self) -> ConnectionInfo:
         # +----+-----+-------+------+----------+----------+
@@ -186,7 +223,7 @@ class ProxyConnection:
             command = Command(data[1])
         except ValueError:
             raise HandshakeError(f"Unknown command")
-        if not data[2] == b'\x00':
+        if not data[2] == RSV:
             raise HandshakeError(f"Reserved byte should be 0 and is: {data[2]}")
         try:
             addr_type = AddressType(data[3])
@@ -224,7 +261,7 @@ class ProxyConnection:
             address_type=addr_type,
             address=ip_addr,
             port=port,
-            address_data=addr_bytes+port_bytes,
+            address_data=addr_bytes + port_bytes,
             command=command,
         )
         log.info("Using host %r and port %r", ip_addr, port)
@@ -235,17 +272,17 @@ def conn_factory(config: ServerConfig):
     async def proxy(reader: StreamReader, writer: StreamWriter) -> None:
         conn = ProxyConnection(reader=reader, writer=writer, config=config)
         await conn.process_request()
+
     return proxy
 
 
-@click.command()
-@click.option('--port', default=10800, help="Port to run on")
-@click.option('--host', default="0.0.0.0", help="Interface to bind to")
-@click.option('--username', default="", help="Username")
-@click.option('--password', default="", help="Password")
-@click.option('--validator', default=None, help="Remote validator url")
-@click.option('--cafile', default=None, help="Validator CA certificate")
-async def main(host, port, username, password, validator, cafile):
+async def main():
+    host = "0.0.0.0"
+    port = 1080
+    username = "foo"
+    password = "foopass"
+    validator = None
+    cafile = None
     config = ServerConfig(
         host=host,
         port=int(port),
@@ -260,6 +297,7 @@ async def main(host, port, username, password, validator, cafile):
     print(f"serving on {addr}")
     async with server:
         await server.serve_forever()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
