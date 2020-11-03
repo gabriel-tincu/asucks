@@ -332,3 +332,32 @@ class ProxyConnection:
         )
         log.info("Using host %r and port %r", ip_addr, port)
         return resp
+
+
+def conn_factory(config: ServerConfig):
+    async def proxy(reader: StreamReader, writer: StreamWriter) -> None:
+        conn = ProxyConnection(reader=reader, writer=writer, config=config)
+        await conn.process_request()
+        log.info("Done processing request")
+
+    return proxy
+
+
+async def run(
+    username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int
+):
+    config = ServerConfig(
+        host=host,
+        port=int(port),
+        username=username,
+        password=password,
+        validator=validator,
+        ca_file=cafile,
+    )
+    log.debug("Got config: %r", config)
+    loop = asyncio.get_running_loop()
+    server = await asyncio.start_server(conn_factory(config), host=config.host, port=config.port, loop=loop)
+    addr = server.sockets[0].getsockname()
+    log.info("Serving on %s", addr)
+    async with server:
+        await server.serve_forever()
