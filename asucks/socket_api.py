@@ -33,7 +33,7 @@ class SocketProxyConnection(ProxyConnection):
     async def source_read(self, count: int) -> bytes:
         while not self.done.is_set():
             if not can_read([self.source_socket, self.destination_socket], self.source_socket):
-                log.info("Source socket not ready for read, waiting")
+                log.debug("Source socket not ready for read, waiting")
                 await sleep(0.1)
                 continue
             return await self.loop.sock_recv(self.source_socket, count)
@@ -43,7 +43,7 @@ class SocketProxyConnection(ProxyConnection):
     async def destination_read(self, count: int) -> bytes:
         while not self.done.is_set():
             if not can_read([self.source_socket, self.destination_socket], self.destination_socket):
-                log.info("Dest socket not ready for read, waiting")
+                log.debug("Dest socket not ready for read, waiting")
                 await sleep(0.1)
                 continue
             return await self.loop.sock_recv(self.destination_socket, count)
