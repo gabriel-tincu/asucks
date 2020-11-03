@@ -3,7 +3,7 @@
 """
 from asyncio.streams import StreamReader, StreamWriter
 from dataclasses import dataclass
-from typing import Optional, Set
+from typing import Optional, Set, Any
 
 import aiohttp
 import asyncio
@@ -15,6 +15,7 @@ import ipaddress
 import json
 import logging
 import socket
+import ssl
 import struct
 
 SOCKS5_VER = b"\x05"
@@ -87,9 +88,22 @@ class ProxyConnection:
         self.dst_writer: Optional[StreamWriter] = None
         self.loop = asyncio.get_running_loop()
 
-    async def use_auth_method(self, method: Method) -> None:
-        self.writer.write(SOCKS5_VER + method.value)
+    async def source_read(self, count):
+        return await self.reader.read(count)
+
+    async def destination_read(self, count):
+        return await self.dst_reader.read(count)
+
+    async def source_write(self, data):
+        self.writer.write(data)
         await self.writer.drain()
+
+    async def destination_write(self, data):
+        self.dst_writer.write(data)
+        await self.dst_writer.drain()
+
+    async def use_auth_method(self, method: Method) -> None:
+        await self.source_write(SOCKS5_VER + method.value)
 
     async def authenticate(self, methods: Set[Method]) -> None:
         if Method.user_pass in methods and self.config.username and self.config.password:
@@ -140,40 +154,52 @@ class ProxyConnection:
         # +-----+------+------+------+----------+----------+
         # |  1  |  1   | X'00'|   1  | Variable |   2      |
         # +-----+------+------+------+----------+----------+
-        self.writer.write(SOCKS5_VER + reply + RSV + connection_info.address_type + connection_info.address_data)
-        await self.writer.drain()
+        await self.source_write(SOCKS5_VER + reply + RSV + connection_info.address_type + connection_info.address_data)
 
     @staticmethod
-    async def copy_data(src: StreamReader, dst: StreamWriter, done: asyncio.Event, name: str):
+    async def copy_data(read: Any, write: Any, done: asyncio.Event, name: str):
         while True:
-            data = await src.read(2048)
-            if src.at_eof():
+            data = await read(2048)
+            if data == b"":
                 done.set()
                 log.info("%s: connection closed", name)
                 break
             if done.is_set():
                 log.info("%s: connection terminated, writing remaining data and bailing", name)
-                dst.write(data)
+                await write(data)
                 break
-            dst.write(data)
+            await write(data)
             log.info("%s: wrote %d bytes", name, len(data))
+
+    async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
+        self.dst_reader, self.dst_writer = await asyncio.open_connection(
+            connection_info.address, connection_info.port, loop=self.loop
+        )
+
+    @property
+    def src_address(self):
+        return self.writer.get_extra_info("peername")
 
     async def handle_connect(self, connection_info: ConnectionInfo) -> None:
         # connect
         try:
-            self.dst_reader, self.dst_writer = await asyncio.open_connection(
-                connection_info.address, connection_info.port, loop=self.loop
-            )
-
             await self.send_command_reply(connection_info, CommandReplyStatus.succeeded)
-            src_addr = self.writer.get_extra_info("peername")
+            await self.create_remote_conn(connection_info)
+            src_addr = self.src_address
             dst_addr = connection_info.address
             event = asyncio.Event()
             self.loop.create_task(
-                self.copy_data(dst=self.writer, src=self.dst_reader, done=event, name=f"{dst_addr} -> {src_addr}")
+                self.copy_data(
+                    read=self.source_read,
+                    write=self.destination_write,
+                    done=event, name=f"{dst_addr} -> {src_addr}"
+                )
             )
             self.loop.create_task(
-                self.copy_data(dst=self.dst_writer, src=self.reader, done=event, name=f"{src_addr} -> {dst_addr}")
+                self.copy_data(
+                    read=self.destination_read,
+                    write=self.source_write, done=event, name=f"{src_addr} -> {dst_addr}"
+                )
             )
             await event.wait()
         except OSError:
@@ -193,13 +219,13 @@ class ProxyConnection:
             await wr.wait_closed()
 
     async def get_auth_methods(self) -> Set[Method]:
-        data = await self.reader.read(1)
+        data = await self.source_read(1)
         if not data or data != SOCKS5_VER:
             raise HandshakeError(f"Socks version {data[0]} not supported")
-        log.info("Read version byte")
-        data = await self.reader.read(1)
+        log.debug("Read version byte")
+        data = await self.source_read(1)
         method_count = int(data[0])
-        data = await self.reader.read(method_count)
+        data = await self.source_read(method_count)
         methods = set()
         if len(data) < method_count:
             # version, count, then one byte each method
@@ -214,34 +240,37 @@ class ProxyConnection:
 
     async def check_credentials(self) -> None:
         # https://tools.ietf.org/html/rfc1929
-        user_auth_version = await self.reader.read(1)
+        user_auth_version = await self.source_read(1)
         if user_auth_version != b"\x01":
-            self.writer.write(b"\x01\x01")
+            await self.source_write(b"\x01\x01")
             raise HandshakeError("Faulty user auth version: %r", user_auth_version)
-        user_len, = struct.unpack("B", await self.reader.read(1))
-        user = (await self.reader.read(user_len)).decode()
-        pass_len, = struct.unpack("B", await self.reader.read(1))
-        password = (await self.reader.read(pass_len)).decode()
+        user_len, = struct.unpack("B", await self.source_read(1))
+        user = (await self.source_read(user_len)).decode()
+        pass_len, = struct.unpack("B", await self.source_read(1))
+        password = (await self.source_read(pass_len)).decode()
         if pass_len != len(password) or user_len != len(user):
-            self.writer.write(b"\x01\x01")
+            await self.source_write(b"\x01\x01")
             raise HandshakeError("Username / Password sizes do not match")
         if not await self.auth_ok(user, password):
-            self.writer.write(b"\x01\x01")
+            await self.source_write(b"\x01\x01")
             raise HandshakeError("Invalid username and/or password")
-        self.writer.write(b"\x01\x00")
+        await self.source_write(b"\x01\x00")
 
     async def auth_ok(self, username: str, password: str) -> bool:
         if not self.config.validator:
             log.info("Performing local credential validation")
             return username == self.config.username and password == self.config.password
         else:
+            ssl_context = None
+            if self.config.ca_file is not None:
+                ssl_context = ssl.create_default_context(capath=self.config.ca_file)
             async with aiohttp.ClientSession() as session:
                 payload = {
                     "type": "external_auth",
                     "username": username,
                     "password": password,
                 }
-                async with session.post(self.config.validator, json=payload) as resp:
+                async with session.post(self.config.validator, json=payload, ssl=ssl_context) as resp:
                     if not resp.ok:
                         log.error("Invalid status code: %r", resp.status)
                         return False
@@ -260,7 +289,7 @@ class ProxyConnection:
         # +----+-----+-------+------+----------+----------+
         # |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
         # +----+-----+-------+------+----------+----------+
-        data = await self.reader.read(4)
+        data = await self.source_read(4)
         if not bytes(data[0]) != SOCKS5_VER:
             raise HandshakeError(f"Invalid protocol version: {data[0]}")
         try:
@@ -276,23 +305,23 @@ class ProxyConnection:
         # ipv4
         if addr_type is AddressType.ipv4:
             log.info("Parsing IPV4 addr type")
-            addr_bytes = await self.reader.read(4)
+            addr_bytes = await self.source_read(4)
             ip_addr = str(ipaddress.ip_address(addr_bytes))
-            port_bytes = await self.reader.read(2)
+            port_bytes = await self.source_read(2)
             port, = struct.unpack(">H", port_bytes)
         elif addr_type is AddressType.ipv6:
             log.info("Parsing IPV6 addr type")
-            addr_bytes = await self.reader.read(16)
+            addr_bytes = await self.source_read(16)
             ip_addr = str(ipaddress.ip_address(addr_bytes))
-            port_bytes = await self.reader.read(2)
+            port_bytes = await self.source_read(2)
             port, = struct.unpack(">H", port_bytes)
         elif addr_type is AddressType.fqdn:
             log.info("Parsing FQDN addr type")
-            addr_len_byte = await self.reader.read(1)
+            addr_len_byte = await self.source_read(1)
             addr_len, = struct.unpack("B", addr_len_byte)
-            addr_str = await self.reader.read(addr_len)
+            addr_str = await self.source_read(addr_len)
             addr_bytes = addr_len_byte + addr_str
-            port_bytes = await self.reader.read(2)
+            port_bytes = await self.source_read(2)
             port, = struct.unpack(">H", port_bytes)
             addr_info = socket.getaddrinfo(addr_str, None)
             if not addr_info:
