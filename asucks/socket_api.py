@@ -77,10 +77,23 @@ class SocketProxyConnection(ProxyConnection):
         return await self.loop.sock_sendall(self.destination_socket, data)
 
     async def close_all(self):
-        self.loop.remove_reader(self.source_socket)
-        self.loop.remove_reader(self.destination_socket)
-        self.source_socket.close()
-        self.destination_socket.close()
+        #  pylint: disable=bare-except
+        try:
+            self.loop.remove_reader(self.source_socket)
+        except:
+            pass
+        try:
+            self.loop.remove_reader(self.destination_socket)
+        except:
+            pass
+        try:
+            self.source_socket.close()
+        except:
+            pass
+        try:
+            self.destination_socket.close()
+        except:
+            pass
         log.info("Closed both source and dest socket")
 
     async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
