@@ -84,6 +84,7 @@ class ProxyConnection:
         self.dst_reader: Optional[StreamReader] = None
         self.dst_writer: Optional[StreamWriter] = None
         self.loop = asyncio.get_running_loop()
+        self.done = asyncio.Event()
 
     async def source_read(self, count):
         return await self.reader.read(count)
@@ -153,20 +154,15 @@ class ProxyConnection:
         # +-----+------+------+------+----------+----------+
         await self.source_write(SOCKS5_VER + reply + RSV + connection_info.address_type + connection_info.address_data)
 
-    @staticmethod
-    async def copy_data(read: Any, write: Any, done: asyncio.Event, name: str):
-        while True:
+    async def copy_data(self, read: Any, write: Any, name: str):
+        while not self.done.is_set():
             data = await read(2048)
             if data == b"":
-                done.set()
+                self.done.set()
                 log.info("%s: connection closed", name)
-                break
-            if done.is_set():
-                log.info("%s: connection terminated, writing remaining data and bailing", name)
-                await write(data)
-                break
             await write(data)
             log.info("%s: wrote %d bytes", name, len(data))
+        log.info("%s: copy loop closed", name)
 
     async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
         self.dst_reader, self.dst_writer = await asyncio.open_connection(
@@ -184,18 +180,14 @@ class ProxyConnection:
             await self.create_remote_conn(connection_info)
             src_addr = self.src_address
             dst_addr = connection_info.address
-            event = asyncio.Event()
             self.loop.create_task(
-                self.copy_data(
-                    read=self.source_read, write=self.destination_write, done=event, name=f"{dst_addr} -> {src_addr}"
-                )
+                self.copy_data(read=self.source_read, write=self.destination_write, name=f"{dst_addr} -> {src_addr}")
             )
             self.loop.create_task(
-                self.copy_data(
-                    read=self.destination_read, write=self.source_write, done=event, name=f"{src_addr} -> {dst_addr}"
-                )
+                self.copy_data(read=self.destination_read, write=self.source_write, name=f"{src_addr} -> {dst_addr}")
             )
-            await event.wait()
+            await self.done.wait()
+            log.info("Closing %s and %s", src_addr, dst_addr)
         except OSError:
             log.exception("Could not open destination connection to %r:%r", connection_info.address, connection_info.port)
             await self.send_command_reply(connection_info, CommandReplyStatus.general_failure)
