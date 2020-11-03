@@ -3,7 +3,7 @@
 """
 from asyncio.streams import StreamReader, StreamWriter
 from dataclasses import dataclass
-from typing import Any, Optional, Set
+from typing import Any, Optional, Set, Union
 
 import aiohttp
 import asyncio
@@ -18,7 +18,7 @@ import struct
 SOCKS5_VER = b"\x05"
 RSV = b"\x00"
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 BUF_SIZE = 2048
 
 
@@ -61,7 +61,7 @@ class HandshakeError(Exception):
 class ConnectionInfo:
     command: Command
     address_type: AddressType
-    address: str
+    address: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
     port: int
     address_data: bytes
 
@@ -152,6 +152,7 @@ class ProxyConnection:
         # |  1  |  1   | X'00'|   1  | Variable |   2      |
         # +-----+------+------+------+----------+----------+
         await self.source_write(SOCKS5_VER + reply + RSV + connection_info.address_type + connection_info.address_data)
+        log.debug("Sent command reply %r", reply)
 
     async def copy_data(self, read: Any, write: Any, name: str):
         while not self.done.is_set():
@@ -165,19 +166,20 @@ class ProxyConnection:
 
     async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
         self.dst_reader, self.dst_writer = await asyncio.open_connection(
-            connection_info.address, connection_info.port, loop=self.loop
+            connection_info.address.exploded, connection_info.port, loop=self.loop
         )
 
     @property
-    def src_address(self):
+    def src_address(self) -> str:
         return self.writer.get_extra_info("peername")
 
     async def handle_connect(self, connection_info: ConnectionInfo) -> None:
         # connect
         try:
-            await self.send_command_reply(connection_info, CommandReplyStatus.succeeded)
             await self.create_remote_conn(connection_info)
+            await self.send_command_reply(connection_info, CommandReplyStatus.succeeded)
             await self.create_proxy_loop()
+            log.debug("Created proxy loop")
             await self.done.wait()
             log.info("Closing %s and %s", self.src_address, self.dst_address)
         except OSError:
@@ -208,12 +210,18 @@ class ProxyConnection:
             wr.close()
             await wr.wait_closed()
 
+    @staticmethod
+    def fail_with_empty(data: Union[bytes, str]):
+        if not data:
+            raise HandshakeError("EOF found, closing connection")
+
     async def get_auth_methods(self) -> Set[Method]:
         data = await self.source_read(1)
         if not data or data != SOCKS5_VER:
             raise HandshakeError(f"Socks version {data[0]} not supported")
         log.debug("Read version byte")
         data = await self.source_read(1)
+        self.fail_with_empty(data)
         method_count = int(data[0])
         data = await self.source_read(method_count)
         methods = set()
@@ -230,12 +238,18 @@ class ProxyConnection:
     async def check_credentials(self) -> None:
         # https://tools.ietf.org/html/rfc1929
         user_auth_version = await self.source_read(1)
+        self.fail_with_empty(user_auth_version)
         if user_auth_version != b"\x01":
             await self.source_write(b"\x01\x01")
             raise HandshakeError(f"Faulty user auth version: {user_auth_version}")
-        user_len, = struct.unpack("B", await self.source_read(1))
+        user_len = await self.source_read(1)
+        self.fail_with_empty(user_len)
+        user_len, = struct.unpack("B", user_len)
         user = (await self.source_read(user_len)).decode()
-        pass_len, = struct.unpack("B", await self.source_read(1))
+        self.fail_with_empty(user)
+        pass_len = await self.source_read(1)
+        self.fail_with_empty(pass_len)
+        pass_len, = struct.unpack("B", pass_len)
         password = (await self.source_read(pass_len)).decode()
         if pass_len != len(password) or user_len != len(user):
             await self.source_write(b"\x01\x01")
@@ -279,6 +293,7 @@ class ProxyConnection:
         # |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
         # +----+-----+-------+------+----------+----------+
         data = await self.source_read(4)
+        self.fail_with_empty(data)
         if struct.pack("B", data[0]) != SOCKS5_VER:
             raise HandshakeError(f"Invalid protocol version: {data[0]}")
         try:
@@ -295,20 +310,26 @@ class ProxyConnection:
         if addr_type is AddressType.ipv4:
             log.info("Parsing IPV4 addr type")
             addr_bytes = await self.source_read(4)
-            ip_addr = str(ipaddress.ip_address(addr_bytes))
+            self.fail_with_empty(addr_bytes)
+            ip_addr = ipaddress.ip_address(addr_bytes)
             port_bytes = await self.source_read(2)
+            self.fail_with_empty(port_bytes)
             port, = struct.unpack(">H", port_bytes)
         elif addr_type is AddressType.ipv6:
             log.info("Parsing IPV6 addr type")
             addr_bytes = await self.source_read(16)
-            ip_addr = str(ipaddress.ip_address(addr_bytes))
+            self.fail_with_empty(addr_bytes)
+            ip_addr = ipaddress.ip_address(addr_bytes)
             port_bytes = await self.source_read(2)
+            self.fail_with_empty(port_bytes)
             port, = struct.unpack(">H", port_bytes)
         elif addr_type is AddressType.fqdn:
             log.info("Parsing FQDN addr type")
             addr_len_byte = await self.source_read(1)
+            self.fail_with_empty(addr_len_byte)
             addr_len, = struct.unpack("B", addr_len_byte)
             addr_str = await self.source_read(addr_len)
+            self.fail_with_empty(addr_str)
             addr_bytes = addr_len_byte + addr_str
             port_bytes = await self.source_read(2)
             port, = struct.unpack(">H", port_bytes)
@@ -323,8 +344,8 @@ class ProxyConnection:
             address_type=addr_type,
             address=ip_addr,
             port=port,
-            address_data=addr_bytes + port_bytes,
             command=command,
+            address_data=addr_bytes + port_bytes,
         )
         log.info("Using host %r and port %r", ip_addr, port)
         return resp

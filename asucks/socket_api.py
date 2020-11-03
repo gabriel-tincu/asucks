@@ -1,4 +1,4 @@
-from asucks.base_server import BUF_SIZE, ConnectionInfo, ProxyConnection, ServerConfig
+from asucks.base_server import AddressType, BUF_SIZE, ConnectionInfo, ProxyConnection, ServerConfig
 from asyncio import AbstractEventLoop, Event, get_running_loop, sleep
 from typing import Any, List, Optional
 
@@ -94,7 +94,12 @@ class SocketProxyConnection(ProxyConnection):
         log.info("Closed both source and dest socket")
 
     async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
-        self.destination_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        log.info("Creating %r socket", connection_info.address_type)
+        if connection_info.address_type is not AddressType.ipv6:
+            self.destination_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        else:
+            self.destination_socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+
         await self.loop.sock_connect(self.destination_socket, (connection_info.address, connection_info.port))
 
     async def create_proxy_loop(self):
