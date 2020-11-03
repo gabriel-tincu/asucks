@@ -1,4 +1,4 @@
-from asucks.base_server import ConnectionInfo, ProxyConnection, ServerConfig
+from asucks.base_server import BUF_SIZE, ConnectionInfo, ProxyConnection, ServerConfig
 from asyncio import AbstractEventLoop, Event, get_running_loop, sleep
 from typing import Any, List, Optional
 
@@ -7,9 +7,6 @@ import select
 import socket
 
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG)
-
-BUF_SIZE = 2048
 
 
 class SocketProxyConnection(ProxyConnection):
@@ -30,7 +27,7 @@ class SocketProxyConnection(ProxyConnection):
 
     @property
     def src_address(self):
-        return self.source_address
+        return self.source_address[0]
 
     async def source_read(self, count: int) -> bytes:
         while not self.done.is_set():

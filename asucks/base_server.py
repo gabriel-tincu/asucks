@@ -18,7 +18,8 @@ import struct
 SOCKS5_VER = b"\x05"
 RSV = b"\x00"
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
+BUF_SIZE = 2048
 
 
 class AddressType(bytes, enum.Enum):
@@ -118,19 +119,16 @@ class ProxyConnection:
             raise HandshakeError(f"Unknown method {methods}")
 
     @staticmethod
-    async def validate_request_data(connection_info) -> bool:
+    async def validate_request_data(connection_info) -> None:
         log.info("Validating %s", connection_info.address)
-        return True
 
     async def process_request(self) -> None:
         try:
-            log.info("get_version")
+            log.debug("Getting supported auth methods")
             methods = await self.get_auth_methods()
             await self.authenticate(methods)
             connection_info = await self.get_dest_info()
-            if not await self.validate_request_data(connection_info):
-                log.error("Could not validate connection info")
-                # TODO -> close the stream here
+            await self.validate_request_data(connection_info)
         except HandshakeError as e:
             log.error("Error during client handshake: %r", e)
             await self.close_all()
@@ -157,7 +155,7 @@ class ProxyConnection:
 
     async def copy_data(self, read: Any, write: Any, name: str):
         while not self.done.is_set():
-            data = await read(2048)
+            data = await read(BUF_SIZE)
             if data == b"":
                 self.done.set()
                 log.info("%s: connection closed", name)
@@ -223,11 +221,10 @@ class ProxyConnection:
             # version, count, then one byte each method
             raise HandshakeError("Not enough data to identify methods")
         for i in range(method_count):
-            log.error("Got %r, %r", data[i], type(data[i]))
             filtered = {m for m in Method if struct.pack("B", data[i]) == m.value}
             if filtered:
                 methods = methods.union(filtered)
-        log.info("Got connection methods: %r", methods)
+        log.debug("Got connection methods: %r", methods)
         return methods
 
     async def check_credentials(self) -> None:
