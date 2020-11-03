@@ -13,3 +13,8 @@ This is still very much a work in progress but the aim goal is to
 $ pip install asucks
 $ python -m asucks.server --host 127.0.0.1 --port 1080
 ```
+
+In another tab
+```shell script
+$ curl -x socks5h://127.0.0.1:1080 http://www.google.com/
+```
