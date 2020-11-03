@@ -9,6 +9,8 @@ import socket
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)
 
+BUF_SIZE = 2048
+
 
 class SocketProxyConnection(ProxyConnection):
     # pylint: disable=super-init-not-called
@@ -40,15 +42,33 @@ class SocketProxyConnection(ProxyConnection):
         log.info("No more data to read from source")
         return b""
 
-    async def destination_read(self, count: int) -> bytes:
-        while not self.done.is_set():
-            if not can_read([self.source_socket, self.destination_socket], self.destination_socket):
-                log.debug("Dest socket not ready for read, waiting")
-                await sleep(0.1)
-                continue
-            return await self.loop.sock_recv(self.destination_socket, count)
-        log.info("No more data to read from dest")
-        return b""
+    def ready_read(self, sock: socket.socket) -> None:
+        if sock is self.destination_socket:
+            dest = self.source_socket
+            src = self.destination_socket
+            src_tag = self.dst_address
+        else:
+            dest = self.destination_socket
+            src = self.source_socket
+            src_tag = self.source_address
+        if not self.done.is_set():
+            read = 0
+            while True:
+                data = src.recv(BUF_SIZE)
+                dest.sendall(data)
+                read += len(data)
+                if not data:
+                    log.debug("Read %d total bytes from %s", read, src_tag)
+                    log.info("EOF read from dest")
+                    self.loop.remove_reader(src)
+                    self.done.set()
+                    return
+                if len(data) < BUF_SIZE:
+                    log.debug("Read %d total bytes from %s", read, src_tag)
+                    return
+        else:
+            log.info("Closing dest sock")
+            self.loop.remove_reader(src)
 
     async def source_write(self, data: bytes):
         return await self.loop.sock_sendall(self.source_socket, data)
@@ -57,12 +77,19 @@ class SocketProxyConnection(ProxyConnection):
         return await self.loop.sock_sendall(self.destination_socket, data)
 
     async def close_all(self):
+        self.loop.remove_reader(self.source_socket)
+        self.loop.remove_reader(self.destination_socket)
         self.source_socket.close()
         self.destination_socket.close()
+        log.info("Closed both source and dest socket")
 
     async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
         self.destination_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         await self.loop.sock_connect(self.destination_socket, (connection_info.address, connection_info.port))
+
+    async def create_proxy_loop(self):
+        self.loop.add_reader(self.destination_socket, self.ready_read, self.destination_socket)
+        self.loop.add_reader(self.source_socket, self.ready_read, self.source_socket)
 
 
 def can_read(all_socks: List[socket.socket], target_sock: socket.socket) -> bool:
@@ -89,6 +116,7 @@ def server_bind_socket(host: str, port: int) -> socket:
     sock.bind((host, port))
     sock.listen(10)
     sock.setblocking(False)
+    log.info("Bound to (%r, %r)", host, port)
     # pylint: enable=no-member
     return sock
 

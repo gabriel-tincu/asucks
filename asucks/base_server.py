@@ -85,6 +85,7 @@ class ProxyConnection:
         self.dst_writer: Optional[StreamWriter] = None
         self.loop = asyncio.get_running_loop()
         self.done = asyncio.Event()
+        self.dst_address: Optional[str] = None
 
     async def source_read(self, count):
         return await self.reader.read(count)
@@ -178,21 +179,26 @@ class ProxyConnection:
         try:
             await self.send_command_reply(connection_info, CommandReplyStatus.succeeded)
             await self.create_remote_conn(connection_info)
-            src_addr = self.src_address
-            dst_addr = connection_info.address
-            self.loop.create_task(
-                self.copy_data(read=self.source_read, write=self.destination_write, name=f"{dst_addr} -> {src_addr}")
-            )
-            self.loop.create_task(
-                self.copy_data(read=self.destination_read, write=self.source_write, name=f"{src_addr} -> {dst_addr}")
-            )
+            await self.create_proxy_loop()
             await self.done.wait()
-            log.info("Closing %s and %s", src_addr, dst_addr)
+            log.info("Closing %s and %s", self.src_address, self.dst_address)
         except OSError:
             log.exception("Could not open destination connection to %r:%r", connection_info.address, connection_info.port)
             await self.send_command_reply(connection_info, CommandReplyStatus.general_failure)
         finally:
             await self.close_all()
+
+    async def create_proxy_loop(self):
+        self.loop.create_task(
+            self.copy_data(
+                read=self.source_read, write=self.destination_write, name=f"{self.dst_address} -> {self.src_address}"
+            )
+        )
+        self.loop.create_task(
+            self.copy_data(
+                read=self.destination_read, write=self.source_write, name=f"{self.src_address} -> {self.dst_address}"
+            )
+        )
 
     async def close_all(self):
         for wr in [self.writer, self.dst_writer]:
@@ -315,6 +321,7 @@ class ProxyConnection:
             ip_addr = addr_info[0][-1][0]
         else:
             raise HandshakeError(f"Invalid address type: {addr_type}")
+        self.dst_address = ip_addr
         resp = ConnectionInfo(
             address_type=addr_type,
             address=ip_addr,
