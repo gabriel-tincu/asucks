@@ -30,14 +30,7 @@ class SocketProxyConnection(ProxyConnection):
         return self.source_address[0]
 
     async def source_read(self, count: int) -> bytes:
-        while not self.done.is_set():
-            if not can_read([self.source_socket, self.destination_socket], self.source_socket):
-                log.debug("Source socket not ready for read, waiting")
-                await sleep(0.1)
-                continue
-            return await self.loop.sock_recv(self.source_socket, count)
-        log.info("No more data to read from source")
-        return b""
+        return await self.loop.sock_recv(self.source_socket, count)
 
     def ready_read(self, sock: socket.socket) -> None:
         if sock is self.destination_socket:
@@ -107,14 +100,9 @@ class SocketProxyConnection(ProxyConnection):
             addr = connection_info.address.compressed
         await self.loop.sock_connect(self.destination_socket, (addr, connection_info.port))
 
-    async def proxy_loop(self):
+    async def proxy_loop(self, sock):
         while not self.done.is_set():
-            sock = None
-            if can_read([self.source_socket, self.destination_socket], self.destination_socket):
-                sock = self.destination_socket
-            if can_read([self.source_socket, self.destination_socket], self.source_socket):
-                sock = self.source_socket
-            if sock is None:
+            if not can_read([self.source_socket, self.destination_socket], sock):
                 await sleep(0.2)
                 continue
             if sock is self.destination_socket:
@@ -135,7 +123,8 @@ class SocketProxyConnection(ProxyConnection):
                 self.done.set()
 
     async def create_proxy_loop(self):
-        self.loop.create_task(self.proxy_loop())
+        self.loop.create_task(self.proxy_loop(self.source_socket))
+        self.loop.create_task(self.proxy_loop(self.destination_socket))
 
 
 def can_read(all_socks: List[socket.socket], target_sock: socket.socket) -> bool:
@@ -171,6 +160,7 @@ async def run_server(server: socket.socket, loop: AbstractEventLoop, handler: An
     # I would have used callable, but having an async signature does not pair well
     while True:
         client, address = await loop.sock_accept(server)
+        client.setblocking(False)
         log.info("Handling connection from %r", address)
         await loop.create_task(handler(client, address))
 

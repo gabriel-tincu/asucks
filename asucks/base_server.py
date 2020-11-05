@@ -19,7 +19,7 @@ SOCKS5_VER = b"\x05"
 RSV = b"\x00"
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-BUF_SIZE = 2048
+BUF_SIZE = 1024 * 32
 
 
 class AddressType(bytes, enum.Enum):
