@@ -101,12 +101,41 @@ class SocketProxyConnection(ProxyConnection):
             self.destination_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         else:
             self.destination_socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        if connection_info.address_type is AddressType.fqdn:
+            addr = connection_info.address
+        else:
+            addr = connection_info.address.compressed
+        await self.loop.sock_connect(self.destination_socket, (addr, connection_info.port))
 
-        await self.loop.sock_connect(self.destination_socket, (connection_info.address.compressed, connection_info.port))
+    async def proxy_loop(self):
+        while not self.done.is_set():
+            sock = None
+            if can_read([self.source_socket, self.destination_socket], self.destination_socket):
+                sock = self.destination_socket
+            if can_read([self.source_socket, self.destination_socket], self.source_socket):
+                sock = self.source_socket
+            if sock is None:
+                await sleep(0.2)
+                continue
+            if sock is self.destination_socket:
+                dest = self.source_socket
+                src = self.destination_socket
+                src_tag = self.dst_address
+                dest_tag = self.src_address
+            else:
+                dest = self.destination_socket
+                src = self.source_socket
+                src_tag = self.source_address
+                dest_tag = self.dst_address
+            log.info("Starting to read from %r", src_tag)
+            data = await self.loop.sock_recv(src, BUF_SIZE)
+            await self.loop.sock_sendall(dest, data)
+            if not data:
+                log.info("EOF read from dest %s", dest_tag)
+                self.done.set()
 
     async def create_proxy_loop(self):
-        self.loop.add_reader(self.destination_socket, self.ready_read, self.destination_socket)
-        self.loop.add_reader(self.source_socket, self.ready_read, self.source_socket)
+        self.loop.create_task(self.proxy_loop())
 
 
 def can_read(all_socks: List[socket.socket], target_sock: socket.socket) -> bool:
