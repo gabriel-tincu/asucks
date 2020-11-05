@@ -275,6 +275,7 @@ class SocketProxyConnection:
             addr = connection_info.address
         else:
             addr = connection_info.address.compressed
+        self.destination_socket.setblocking(True)
         self.destination_socket.connect((addr, connection_info.port))
 
     def create_proxy_loop(self):
@@ -328,7 +329,7 @@ def server_bind_socket(host: str, port: int) -> socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind((host, port))
     sock.listen(10)
-    sock.setblocking(False)
+    sock.setblocking(True)
     log.info("Bound to (%r, %r)", host, port)
     # pylint: enable=no-member
     return sock
@@ -342,6 +343,7 @@ def run_server(server: socket.socket, handler: Any) -> None:
             log.info("Handling connection from %r", address)
             Thread(target=handler, args=(client, address)).run()
         except BlockingIOError:
+            log.error("Blocking err")
             time.sleep(1)
 
 
