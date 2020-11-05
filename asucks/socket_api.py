@@ -341,7 +341,7 @@ def run_server(server: socket.socket, handler: Any) -> None:
         try:
             client, address = server.accept()
             log.info("Handling connection from %r", address)
-            Thread(target=handler, args=(client, address)).run()
+            Thread(target=handler, args=(client, address)).start()
         except BlockingIOError:
             log.error("Blocking err")
             time.sleep(1)
