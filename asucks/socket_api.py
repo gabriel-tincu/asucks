@@ -44,10 +44,12 @@ class SocketProxyConnection(ProxyConnection):
             dest = self.source_socket
             src = self.destination_socket
             src_tag = self.dst_address
+            dest_tag = self.src_address
         else:
             dest = self.destination_socket
             src = self.source_socket
             src_tag = self.source_address
+            dest_tag = self.dst_address
         if not self.done.is_set():
             read = 0
             while True:
@@ -56,7 +58,7 @@ class SocketProxyConnection(ProxyConnection):
                 read += len(data)
                 if not data:
                     log.debug("Read %d total bytes from %s", read, src_tag)
-                    log.info("EOF read from dest")
+                    log.info("EOF read from dest %s", dest_tag)
                     self.loop.remove_reader(src)
                     self.done.set()
                     return
@@ -64,7 +66,7 @@ class SocketProxyConnection(ProxyConnection):
                     log.debug("Read %d total bytes from %s", read, src_tag)
                     return
         else:
-            log.info("Closing dest sock")
+            log.info("Closing dest sock %r", dest_tag)
             self.loop.remove_reader(src)
 
     async def source_write(self, data: bytes):
@@ -140,6 +142,7 @@ async def run_server(server: socket.socket, loop: AbstractEventLoop, handler: An
     # I would have used callable, but having an async signature does not pair well
     while True:
         client, address = await loop.sock_accept(server)
+        log.info("Handling connection from %r", address)
         await loop.create_task(handler(client, address))
 
 
