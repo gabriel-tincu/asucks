@@ -143,7 +143,7 @@ async def run_server(server: socket.socket, loop: AbstractEventLoop, handler: An
     while True:
         client, address = await loop.sock_accept(server)
         log.info("Handling connection from %r", address)
-        await loop.create_task(handler(client, address))
+        loop.create_task(handler(client, address))
 
 
 async def run(
