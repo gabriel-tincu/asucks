@@ -102,7 +102,7 @@ class SocketProxyConnection(ProxyConnection):
         else:
             self.destination_socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
 
-        await self.loop.sock_connect(self.destination_socket, (connection_info.address, connection_info.port))
+        await self.loop.sock_connect(self.destination_socket, (connection_info.address.compressed, connection_info.port))
 
     async def create_proxy_loop(self):
         self.loop.add_reader(self.destination_socket, self.ready_read, self.destination_socket)
