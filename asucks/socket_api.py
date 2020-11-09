@@ -1,9 +1,8 @@
 from asucks.base_server import AddressType, BUF_SIZE, ConnectionInfo, ProxyConnection, ServerConfig
-from asyncio import AbstractEventLoop, Event, get_running_loop, sleep
-from typing import Any, List, Optional
+from asyncio import AbstractEventLoop, Event, get_running_loop
+from typing import Any, Optional
 
 import logging
-import select
 import socket
 
 log = logging.getLogger(__name__)
@@ -30,44 +29,31 @@ class SocketProxyConnection(ProxyConnection):
         return self.source_address[0]
 
     async def source_read(self, count: int) -> bytes:
-        while not self.done.is_set():
-            if not can_read([self.source_socket, self.destination_socket], self.source_socket):
-                log.debug("Source socket not ready for read, waiting")
-                await sleep(0.1)
-                continue
-            return await self.loop.sock_recv(self.source_socket, count)
-        log.info("No more data to read from source")
-        return b""
+        return await self.loop.sock_recv(self.source_socket, count)
 
     def ready_read(self, sock: socket.socket) -> None:
         if sock is self.destination_socket:
             dest = self.source_socket
             src = self.destination_socket
             src_tag = self.dst_address
-            dest_tag = self.src_address
+            dst_tag = self.source_socket
         else:
             dest = self.destination_socket
             src = self.source_socket
             src_tag = self.source_address
-            dest_tag = self.dst_address
-        if not self.done.is_set():
-            read = 0
-            while True:
-                data = src.recv(BUF_SIZE)
-                dest.sendall(data)
-                read += len(data)
-                if not data:
-                    log.debug("Read %d total bytes from %s", read, src_tag)
-                    log.info("EOF read from dest %s", dest_tag)
-                    self.loop.remove_reader(src)
-                    self.done.set()
-                    return
-                if len(data) < BUF_SIZE:
-                    log.debug("Read %d total bytes from %s", read, src_tag)
-                    return
-        else:
-            log.info("Closing dest sock %r", dest_tag)
-            self.loop.remove_reader(src)
+            dst_tag = self.dst_address
+        while not self.done.is_set():
+            data = src.recv(BUF_SIZE)
+            dest.sendall(data)
+            log.debug("Sent %d bytes from %s to %s", len(data), src_tag, dst_tag)
+            if not data:
+                log.info("EOF read from destination %s", src_tag)
+                self.loop.remove_reader(src)
+                self.done.set()
+                return
+            if len(data) < BUF_SIZE:
+                log.debug("Read %d bytes instead of %d, waiting to be called again", len(data), BUF_SIZE)
+                return
 
     async def source_write(self, data: bytes):
         return await self.loop.sock_sendall(self.source_socket, data)
@@ -77,23 +63,13 @@ class SocketProxyConnection(ProxyConnection):
 
     async def close_all(self):
         #  pylint: disable=bare-except
-        try:
-            self.loop.remove_reader(self.source_socket)
-        except:
-            pass
-        try:
-            self.loop.remove_reader(self.destination_socket)
-        except:
-            pass
-        try:
-            self.source_socket.close()
-        except:
-            pass
-        try:
-            self.destination_socket.close()
-        except:
-            pass
-        log.info("Closed both source and dest socket")
+        for sock in [self.source_socket, self.destination_socket]:
+            self.loop.remove_reader(sock)
+            try:
+                sock.close()
+            except:
+                pass
+        log.info("Closed both source and destination sockets")
 
     async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
         log.info("Creating %r socket", connection_info.address_type)
@@ -101,30 +77,15 @@ class SocketProxyConnection(ProxyConnection):
             self.destination_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         else:
             self.destination_socket = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-
-        await self.loop.sock_connect(self.destination_socket, (connection_info.address.compressed, connection_info.port))
+        if connection_info.address_type is AddressType.fqdn:
+            addr = connection_info.address
+        else:
+            addr = connection_info.address.compressed
+        await self.loop.sock_connect(self.destination_socket, (addr, connection_info.port))
 
     async def create_proxy_loop(self):
         self.loop.add_reader(self.destination_socket, self.ready_read, self.destination_socket)
         self.loop.add_reader(self.source_socket, self.ready_read, self.source_socket)
-
-
-def can_read(all_socks: List[socket.socket], target_sock: socket.socket) -> bool:
-    all_socks = [s for s in all_socks if s is not None]
-    if not all_socks:
-        log.error("No socket object defined yet")
-        return False
-    try:
-        reader, _, _ = select.select(all_socks, [], [], 1)
-    except select.error as e:
-        log.error("Select failed: %r", e)
-        return False
-    if not reader:
-        return False
-    for sock in reader:
-        if sock is target_sock:
-            return True
-    return False
 
 
 def server_bind_socket(host: str, port: int) -> socket:
@@ -142,6 +103,7 @@ async def run_server(server: socket.socket, loop: AbstractEventLoop, handler: An
     # I would have used callable, but having an async signature does not pair well
     while True:
         client, address = await loop.sock_accept(server)
+        client.setblocking(False)
         log.info("Handling connection from %r", address)
         loop.create_task(handler(client, address))
 
