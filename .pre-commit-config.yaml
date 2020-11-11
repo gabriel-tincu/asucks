@@ -37,7 +37,8 @@ repos:
       - id: debug-statements
 
   # https://pre-commit.com/#repository-local-hooks
-  - repo: local
+  - repo: https://github.com/pre-commit/mirrors-pylint
+    rev: v2.6.0
     hooks:
       - id: pylint
         name: pylint

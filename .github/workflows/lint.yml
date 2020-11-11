@@ -16,6 +16,5 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Run all pre-commit hooks
+      - name: Run checks
         run: pre-commit run --all-files
-

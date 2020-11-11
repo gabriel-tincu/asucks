@@ -8,6 +8,7 @@ import click
 # pylint: enable=import-error
 import logging
 
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 
@@ -18,11 +19,20 @@ log = logging.getLogger(__name__)
 @click.option("--password", default=None, help="Password for user/pass auth")
 @click.option("--validator", default=None, help="External validator url")
 @click.option("--cafile", default=None, help="Validate certificate")
+@click.option("--log-level", default="INFO", help="Log level visible")
 @click.option("--use-sockets", default=True, help="Use the base socket server implementation")
 def main(
     username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int,
-    use_sockets: bool
+    use_sockets: bool, log_level: str
 ):
+    run_main(username, password, validator, cafile, host, port, use_sockets, log_level)
+
+
+def run_main(
+    username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int,
+    use_sockets: bool, log_level: str
+):
+    logging.basicConfig(level=log_level)
     run = socket_run if use_sockets else stream_run
     asyncio.run(run(
         username=username,

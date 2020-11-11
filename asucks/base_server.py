@@ -18,7 +18,6 @@ import struct
 SOCKS5_VER = b"\x05"
 RSV = b"\x00"
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 BUF_SIZE = 2048
 
 
@@ -44,7 +43,7 @@ class Command(bytes, enum.Enum):
 class CommandReplyStatus(bytes, enum.Enum):
     succeeded = b"\x00"
     general_failure = b"\x01"
-    conn_not_allower = b"\x02"
+    conn_not_allowed = b"\x02"
     network_unreachable = b"\x03"
     host_unreachable = b"\x04"
     connection_refused = b"\x05"
@@ -61,7 +60,7 @@ class HandshakeError(Exception):
 class ConnectionInfo:
     command: Command
     address_type: AddressType
-    address: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
+    address: Union[ipaddress.IPv4Address, ipaddress.IPv6Address, str]
     port: int
     address_data: bytes
 
@@ -77,14 +76,22 @@ class ServerConfig:
 
 
 class ProxyConnection:
-    def __init__(self, reader: StreamReader, writer: StreamWriter, config: ServerConfig):
+    def __init__(
+        self,
+        reader: Optional[StreamReader],
+        writer: Optional[StreamWriter],
+        config: Optional[ServerConfig],
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        http_client: Optional[aiohttp.ClientSession] = None,
+    ):
         log.info("Got reader: %r and writer %r", reader, writer)
         self.config = config
         self.reader = reader
         self.writer = writer
         self.dst_reader: Optional[StreamReader] = None
         self.dst_writer: Optional[StreamWriter] = None
-        self.loop = asyncio.get_running_loop()
+        self.http_client = http_client or aiohttp.ClientSession()
+        self.loop = loop or asyncio.get_running_loop()
         self.done = asyncio.Event()
         self.dst_address: Optional[str] = None
 
@@ -127,7 +134,7 @@ class ProxyConnection:
             log.debug("Getting supported auth methods")
             methods = await self.get_auth_methods()
             await self.authenticate(methods)
-            connection_info = await self.get_dest_info()
+            connection_info = await self.get_destination_info()
             await self.validate_request_data(connection_info)
         except HandshakeError as e:
             log.error("Error during client handshake: %r", e)
@@ -161,13 +168,15 @@ class ProxyConnection:
                 self.done.set()
                 log.info("%s: connection closed", name)
             await write(data)
-            log.info("%s: wrote %d bytes", name, len(data))
+            log.debug("%s: wrote %d bytes", name, len(data))
         log.info("%s: copy loop closed", name)
 
     async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
-        self.dst_reader, self.dst_writer = await asyncio.open_connection(
-            connection_info.address.exploded, connection_info.port, loop=self.loop
-        )
+        if connection_info.address_type is AddressType.fqdn:
+            address = connection_info.address
+        else:
+            address = connection_info.address.exploded
+        self.dst_reader, self.dst_writer = await asyncio.open_connection(address, connection_info.port, loop=self.loop)
 
     @property
     def src_address(self) -> str:
@@ -216,6 +225,11 @@ class ProxyConnection:
             raise HandshakeError("EOF found, closing connection")
 
     async def get_auth_methods(self) -> Set[Method]:
+        # +-----+----------+----------+
+        # | VER | NMETHODS | METHODS  |
+        # +-----+----------+----------+
+        # |   1 |     1    | 1 to 255 |
+        # +-----+----------+----------+
         data = await self.source_read(1)
         if not data or data != SOCKS5_VER:
             raise HandshakeError(f"Socks version {data[0]} not supported")
@@ -229,31 +243,40 @@ class ProxyConnection:
             # version, count, then one byte each method
             raise HandshakeError("Not enough data to identify methods")
         for i in range(method_count):
-            filtered = {m for m in Method if struct.pack("B", data[i]) == m.value}
+            filtered = {m for m in Method if data[i:i + 1] == m.value}
             if filtered:
                 methods = methods.union(filtered)
         log.debug("Got connection methods: %r", methods)
+        if not methods:
+            raise HandshakeError("No viable methods found")
         return methods
 
     async def check_credentials(self) -> None:
         # https://tools.ietf.org/html/rfc1929
         user_auth_version = await self.source_read(1)
-        self.fail_with_empty(user_auth_version)
         if user_auth_version != b"\x01":
             await self.source_write(b"\x01\x01")
             raise HandshakeError(f"Faulty user auth version: {user_auth_version}")
         user_len = await self.source_read(1)
-        self.fail_with_empty(user_len)
-        user_len, = struct.unpack("B", user_len)
-        user = (await self.source_read(user_len)).decode()
-        self.fail_with_empty(user)
-        pass_len = await self.source_read(1)
-        self.fail_with_empty(pass_len)
-        pass_len, = struct.unpack("B", pass_len)
-        password = (await self.source_read(pass_len)).decode()
-        if pass_len != len(password) or user_len != len(user):
+        if user_len == b"":
             await self.source_write(b"\x01\x01")
-            raise HandshakeError("Username / Password sizes do not match")
+            raise HandshakeError("Missing user len")
+        user_len, = struct.unpack("B", user_len)
+        user = await self.source_read(user_len)
+        if len(user) != user_len:
+            await self.source_write(b"\x01\x01")
+            raise HandshakeError("Faulty user len")
+        user = user.decode()
+        pass_len = await self.source_read(1)
+        if pass_len == b"":
+            await self.source_write(b"\x01\x01")
+            raise HandshakeError("Missing pass len")
+        pass_len, = struct.unpack("B", pass_len)
+        password = await self.source_read(pass_len)
+        if len(password) != pass_len:
+            await self.source_write(b"\x01\x01")
+            raise HandshakeError("Faulty password len")
+        password = password.decode()
         if not await self.auth_ok(user, password):
             await self.source_write(b"\x01\x01")
             raise HandshakeError("Invalid username and/or password")
@@ -267,87 +290,92 @@ class ProxyConnection:
         ssl_context = None
         if self.config.ca_file is not None:
             ssl_context = ssl.create_default_context(capath=self.config.ca_file)
-        async with aiohttp.ClientSession() as session:
-            payload = {
-                "type": "external_auth",
-                "username": username,
-                "password": password,
-            }
-            async with session.post(self.config.validator, json=payload, ssl=ssl_context) as resp:
-                if not resp.ok:
-                    log.error("Invalid status code: %r", resp.status)
+        payload = {
+            "type": "external_auth",
+            "username": username,
+            "password": password,
+        }
+        async with self.http_client.post(self.config.validator, json=payload, ssl=ssl_context) as resp:
+            if not resp.ok:
+                log.error("Invalid status code: %r", resp.status)
+                return False
+            try:
+                data = await resp.json()
+                if "decision" not in data or data["decision"] != "authenticated":
+                    log.error("Invalid response")
                     return False
-                try:
-                    data = await resp.json()
-                    if "decision" not in data or data["decision"] != "authenticated":
-                        log.error("Invalid response")
-                        return False
-                except json.JSONDecodeError:
-                    log.error("Response data is not valid json")
-                    return False
+            except json.JSONDecodeError:
+                log.error("Response data is not valid json")
+                return False
+        return True
 
-        return False
-
-    async def get_dest_info(self) -> ConnectionInfo:
+    async def get_destination_info(self) -> ConnectionInfo:
         # +----+-----+-------+------+----------+----------+
         # |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
         # +----+-----+-------+------+----------+----------+
         data = await self.source_read(4)
         self.fail_with_empty(data)
-        if struct.pack("B", data[0]) != SOCKS5_VER:
+        if data[0:1] != SOCKS5_VER:
             raise HandshakeError(f"Invalid protocol version: {data[0]}")
         try:
-            command = Command(struct.pack("B", data[1]))
-        except ValueError:
-            raise HandshakeError(f"Unknown command")
-        if not struct.pack("B", data[2]) == RSV:
+            command = Command(data[1:2])
+        except ValueError as e:
+            raise HandshakeError("Unknown command") from e
+        if not data[2:3] == RSV:
             raise HandshakeError(f"Reserved byte should be 0 and is: {data[2]}")
         try:
-            addr_type = AddressType(struct.pack("B", data[3]))
-        except ValueError:
-            raise HandshakeError(f"Invalid address type: {data[3]}")
+            address_type = AddressType(data[3:4])
+        except ValueError as e:
+            raise HandshakeError(f"Invalid address type: {data[3]}") from e
         # ipv4
-        if addr_type is AddressType.ipv4:
+        if address_type is AddressType.ipv4:
             log.info("Parsing IPV4 addr type")
-            addr_bytes = await self.source_read(4)
-            self.fail_with_empty(addr_bytes)
-            ip_addr = ipaddress.ip_address(addr_bytes)
+            address_bytes = await self.source_read(4)
+            if len(address_bytes) < 4:
+                raise HandshakeError("IPV4 bytes not fully read")
+            ip_address = ipaddress.ip_address(address_bytes)
             port_bytes = await self.source_read(2)
-            self.fail_with_empty(port_bytes)
+            if len(port_bytes) < 2:
+                raise HandshakeError("port bytes not fully read")
             port, = struct.unpack(">H", port_bytes)
-        elif addr_type is AddressType.ipv6:
+        elif address_type is AddressType.ipv6:
             log.info("Parsing IPV6 addr type")
-            addr_bytes = await self.source_read(16)
-            self.fail_with_empty(addr_bytes)
-            ip_addr = ipaddress.ip_address(addr_bytes)
+            address_bytes = await self.source_read(16)
+            if len(address_bytes) < 16:
+                raise HandshakeError("IPV6 bytes not fully read")
+            ip_address = ipaddress.ip_address(address_bytes)
             port_bytes = await self.source_read(2)
-            self.fail_with_empty(port_bytes)
+            if len(port_bytes) < 2:
+                raise HandshakeError("port bytes not fully read")
             port, = struct.unpack(">H", port_bytes)
-        elif addr_type is AddressType.fqdn:
+        elif address_type is AddressType.fqdn:
             log.info("Parsing FQDN addr type")
-            addr_len_byte = await self.source_read(1)
-            self.fail_with_empty(addr_len_byte)
-            addr_len, = struct.unpack("B", addr_len_byte)
-            addr_str = await self.source_read(addr_len)
-            self.fail_with_empty(addr_str)
-            addr_bytes = addr_len_byte + addr_str
+            address_len_byte = await self.source_read(1)
+            self.fail_with_empty(address_len_byte)
+            address_len, = struct.unpack("B", address_len_byte)
+            address_str = await self.source_read(address_len)
+            if len(address_str) < address_len:
+                raise HandshakeError("FQDN bytes not fully read")
+            address_bytes = address_len_byte + address_str
             port_bytes = await self.source_read(2)
+            if len(port_bytes) < 2:
+                raise HandshakeError("port bytes not fully read")
             port, = struct.unpack(">H", port_bytes)
-            addr_info = socket.getaddrinfo(addr_str, None)
-            if not addr_info:
-                raise HandshakeError(f"Could not decode adddres info from {data}")
-            ip_addr = addr_info[0][-1][0]
+            address_info = socket.getaddrinfo(address_str, None)
+            if not address_info:
+                raise HandshakeError(f"Could not decode address info from {data}")
+            ip_address = address_info[0][-1][0]
         else:
-            raise HandshakeError(f"Invalid address type: {addr_type}")
-        self.dst_address = ip_addr
+            raise HandshakeError(f"Invalid address type: {address_type}")
+        self.dst_address = ip_address
         resp = ConnectionInfo(
-            address_type=addr_type,
-            address=ip_addr,
+            address_type=address_type,
+            address=ip_address,
             port=port,
             command=command,
-            address_data=addr_bytes + port_bytes,
+            address_data=address_bytes + port_bytes,
         )
-        log.info("Using host %r and port %r", ip_addr, port)
+        log.info("Using host %r and port %r", ip_address, port)
         return resp
 
 
