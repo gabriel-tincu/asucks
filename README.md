@@ -12,8 +12,6 @@ This is still a work in progress but among the aim goals are:
    3) [ ] UDP
 
 - Add a dockerfile plus instructions
-- Bundle what are now functions for starting the server into classes, for embedded use
-- Add graceful shutdown logic for said classes
 
 Currently there is a growing test suite that handles both unit and integration tests (those could use some improvement)
 

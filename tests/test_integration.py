@@ -1,6 +1,6 @@
 from aiohttp_socks import ProxyConnector
-from asucks.base_server import run as stream_run
-from asucks.socket_api import run as socker_run
+from asucks.base_server import ServerConfig
+from asucks.server import run_main
 
 import aiohttp
 import asyncio
@@ -13,15 +13,15 @@ pytestmark = pytest.mark.asyncio
 async def test_proxied_http_calls():
     loop = asyncio.get_running_loop()
     port = random.randint(40000, 60000)
-    coro = stream_run(
+    config = ServerConfig(
         username="foo",
         password="foopass",
         host="127.0.0.1",
         port=port,
-        cafile=None,
+        ca_file=None,
         validator=None,
     )
-    task = loop.create_task(coro)
+    task = loop.create_task(run_main(config, False, "ERROR"))
     await asyncio.sleep(0.5)
     connector = ProxyConnector.from_url(f"socks5://foo:foopass@127.0.0.1:{port}")
     async with aiohttp.ClientSession(connector=connector) as session:
@@ -29,15 +29,15 @@ async def test_proxied_http_calls():
         assert resp.ok
     task.cancel()
     port = random.randint(40000, 60000)
-    coro = socker_run(
+    config = ServerConfig(
         username="foo",
         password="foopass",
         host="127.0.0.1",
         port=port,
-        cafile=None,
+        ca_file=None,
         validator=None,
     )
-    task = loop.create_task(coro)
+    task = loop.create_task(run_main(config, True, "ERROR"))
     await asyncio.sleep(0.5)
     connector = ProxyConnector.from_url(f"socks5://foo:foopass@127.0.0.1:{port}")
     async with aiohttp.ClientSession(connector=connector) as session:

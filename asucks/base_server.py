@@ -1,6 +1,7 @@
 """
     http://www.faqs.org/rfcs/rfc1928.html
 """
+from asyncio import AbstractEventLoop, AbstractServer, Event, sleep
 from asyncio.streams import StreamReader, StreamWriter
 from dataclasses import dataclass
 from typing import Any, Optional, Set, Union
@@ -84,7 +85,7 @@ class ProxyConnection:
         loop: Optional[asyncio.AbstractEventLoop] = None,
         http_client: Optional[aiohttp.ClientSession] = None,
     ):
-        log.info("Got reader: %r and writer %r", reader, writer)
+        log.debug("Got reader: %r and writer %r", reader, writer)
         self.total_transported = 0
         self.config = config
         self.reader = reader
@@ -108,6 +109,7 @@ class ProxyConnection:
 
     async def source_write(self, data):
         self.total_transported += len(data)
+        self.writer.is_closing()
         self.writer.write(data)
         await self.writer.drain()
 
@@ -175,10 +177,11 @@ class ProxyConnection:
             data = await read(BUF_SIZE)
             if data == b"":
                 self.done.set()
-                log.info("%s: connection closed", name)
+                log.debug("%s: connection closed", name)
+                break
             await write(data)
             log.debug("%s: wrote %d bytes", name, len(data))
-        log.info("%s: copy loop closed", name)
+        log.debug("%s: copy loop closed", name)
 
     async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
         if connection_info.address_type is AddressType.fqdn:
@@ -225,11 +228,14 @@ class ProxyConnection:
         for wr in [self.writer, self.dst_writer]:
             if wr is None:
                 continue
-            log.info("Closing connection to %r", wr.get_extra_info("peername"))
+            log.debug("Closing connection to %r", wr.get_extra_info("peername"))
             wr.write_eof()
             await wr.drain()
             wr.close()
             await wr.wait_closed()
+        if self.http_client is not None:
+            await self.http_client.close()
+        log.info("Shuffled a total of %d bytes", self.total_transported)
 
     @staticmethod
     def fail_with_empty(data: Union[bytes, str]):
@@ -387,8 +393,38 @@ class ProxyConnection:
             command=command,
             address_data=address_bytes + port_bytes,
         )
-        log.info("Using host %r and port %r", ip_address, port)
+        log.debug("Using host %r and port %r", ip_address, port)
         return resp
+
+
+class StreamServer:
+    def __init__(self, config: ServerConfig, loop: AbstractEventLoop, closing: Optional[Event]):
+        self.config = config
+        self.loop = loop
+        self.closing = closing
+        self.server: Optional[AbstractServer] = None
+
+    async def conn_handler(self, reader: StreamReader, writer: StreamWriter) -> None:
+        conn = ProxyConnection(reader=reader, writer=writer, config=self.config)
+        await conn.process_request()
+        log.info("Done processing request")
+
+    async def run_server(self) -> None:
+        self.server = await asyncio.start_server(
+            self.conn_handler, host=self.config.host, port=self.config.port, loop=self.loop
+        )
+        async with self.server:
+            await self.server.start_serving()
+            while not self.closing.is_set():
+                await sleep(0.5)
+        log.info("Closing down server")
+        try:
+            self.server.close()
+        except Exception as e:  # pylint: disable=broad-except
+            log.error("Error closing down server: %r", e)
+
+    def close(self):
+        self.closing.set()
 
 
 def conn_factory(config: ServerConfig):
@@ -398,23 +434,3 @@ def conn_factory(config: ServerConfig):
         log.info("Done processing request")
 
     return proxy
-
-
-async def run(
-    username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int
-):
-    config = ServerConfig(
-        host=host,
-        port=int(port),
-        username=username,
-        password=password,
-        validator=validator,
-        ca_file=cafile,
-    )
-    log.debug("Got config: %r", config)
-    loop = asyncio.get_running_loop()
-    server = await asyncio.start_server(conn_factory(config), host=config.host, port=config.port, loop=loop)
-    addr = server.sockets[0].getsockname()
-    log.info("Serving on %s", addr)
-    async with server:
-        await server.serve_forever()

@@ -1,6 +1,6 @@
 from asucks.base_server import AddressType, BUF_SIZE, ConnectionInfo, ProxyConnection, ServerConfig
-from asyncio import AbstractEventLoop, Event, get_running_loop
-from typing import Any, Optional
+from asyncio import AbstractEventLoop, Event
+from typing import Optional
 
 import logging
 import socket
@@ -94,48 +94,46 @@ class SocketProxyConnection(ProxyConnection):
         self.loop.add_reader(self.source_socket, self.ready_read, self.source_socket)
 
 
-def server_bind_socket(host: str, port: int) -> socket:
-    # pylint: disable=no-member
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind((host, port))
-    sock.listen(10)
-    sock.setblocking(False)
-    log.info("Bound to (%r, %r)", host, port)
-    # pylint: enable=no-member
-    return sock
+class SocketServer:
+    def __init__(self, config: ServerConfig, loop: AbstractEventLoop, closing: Optional[Event] = None):
+        self.config = config
+        self.loop = loop
+        self.closing = closing or Event()
+        self.server: Optional[socket] = None
 
+    def bind(self):
+        # pylint: disable=no-member
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind((self.config.host, self.config.port))
+        sock.listen(10)
+        sock.setblocking(False)
+        log.info("Bound to (%r, %r)", self.config.host, self.config.port)
+        # pylint: enable=no-member
+        return sock
 
-async def run_server(server: socket.socket, loop: AbstractEventLoop, handler: Any) -> None:
-    # I would have used callable, but having an async signature does not pair well
-    while True:
-        client, address = await loop.sock_accept(server)
-        client.setblocking(False)
-        log.info("Handling connection from %r", address)
-        loop.create_task(handler(client, address))
+    async def run_server(self) -> None:
+        self.server = self.bind()
+        while not self.closing.is_set():
+            client, address = await self.loop.sock_accept(self.server)
+            client.setblocking(False)
+            log.info("Handling connection from %r", address)
+            self.loop.create_task(self.conn_handler(client, address))
+        log.info("Server closing down")
+        if self.server:
+            try:
+                self.server.close()
+            except socket.error as e:
+                log.error("Error closing down server: %r", e)
 
-
-async def run(
-    username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int
-):
-    config = ServerConfig(
-        host=host,
-        port=int(port),
-        username=username,
-        password=password,
-        validator=validator,
-        ca_file=cafile,
-    )
-    loop = get_running_loop()
-
-    async def handler(client: socket.socket, address: str):
+    async def conn_handler(self, client: socket.socket, address: str) -> None:
         conn = SocketProxyConnection(
             source_socket=client,
             source_address=address,
-            loop=loop,
-            config=config,
+            loop=self.loop,
+            config=self.config,
         )
         await conn.process_request()
         log.debug("Done handling requests for %s", address)
 
-    server = server_bind_socket(host=config.host, port=config.port)
-    await run_server(server=server, loop=loop, handler=handler)
+    def close(self):
+        self.closing.set()
