@@ -2,25 +2,14 @@ from asucks.base_server import ServerConfig, StreamServer
 from asucks.socket_api import SocketServer
 from typing import Optional
 
+import argparse
 import asyncio
-# pylint: disable=import-error
-import click
-# pylint: enable=import-error
 import logging
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 
-@click.command()
-@click.option("--port", default=1080, help="Server port")
-@click.option("--host", default="0.0.0.0", help="Network interface")
-@click.option("--username", default=None, help="Username for user/pass auth")
-@click.option("--password", default=None, help="Password for user/pass auth")
-@click.option("--validator", default=None, help="External validator url")
-@click.option("--cafile", default=None, help="Remote validator certificate file")
-@click.option("--log-level", default="INFO", help="Log level visible")
-@click.option("--use-sockets", default=False, help="Use the base socket server implementation")
 def main(
     username: Optional[str], password: Optional[str], validator: Optional[str], cafile: Optional[str], host: str, port: int,
     use_sockets: bool, log_level: str
@@ -51,5 +40,23 @@ async def run_main(config: ServerConfig, use_sockets: bool, log_level: str):
 
 
 if __name__ == "__main__":
-    # pylint: disable=no-value-for-parameter
-    main()
+    parser = argparse.ArgumentParser(description="SOCKS5 server", prog="asucks.server")
+    parser.add_argument("--port", default=1080, help="Server port")
+    parser.add_argument("--host", default="0.0.0.0", help="Network interface")
+    parser.add_argument("--username", default=None, help="Username for user/pass auth")
+    parser.add_argument("--password", default=None, help="Password for user/pass auth")
+    parser.add_argument("--validator", default=None, help="External validator url")
+    parser.add_argument("--cafile", default=None, help="Remote validator certificate file")
+    parser.add_argument("--log-level", default="INFO", help="Log level visible")
+    parser.add_argument("--use-sockets", default=False, help="Use the base socket server implementation")
+    args = parser.parse_args(None)
+    main(
+        username=args.username,
+        password=args.password,
+        validator=args.validator,
+        port=args.port,
+        host=args.host,
+        cafile=args.cafile,
+        log_level=args.log_level,
+        use_sockets=args.use_sockets,
+    )

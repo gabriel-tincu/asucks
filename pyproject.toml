@@ -6,7 +6,6 @@ authors = ["Gabriel Tincu <gabi@aiven.io>"]
 
 [tool.poetry.dependencies]
 python = "^3.7"
-click = "7.1.2"
 aiohttp = "3.7.2"
 
 
