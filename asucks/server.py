@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 @click.option("--username", default=None, help="Username for user/pass auth")
 @click.option("--password", default=None, help="Password for user/pass auth")
 @click.option("--validator", default=None, help="External validator url")
-@click.option("--cafile", default=None, help="Validate certificate")
+@click.option("--cafile", default=None, help="Remote validator certificate file")
 @click.option("--log-level", default="INFO", help="Log level visible")
 @click.option("--use-sockets", default=True, help="Use the base socket server implementation")
 def main(

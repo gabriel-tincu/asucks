@@ -85,6 +85,7 @@ class ProxyConnection:
         http_client: Optional[aiohttp.ClientSession] = None,
     ):
         log.info("Got reader: %r and writer %r", reader, writer)
+        self.total_transported = 0
         self.config = config
         self.reader = reader
         self.writer = writer
@@ -96,16 +97,22 @@ class ProxyConnection:
         self.dst_address: Optional[str] = None
 
     async def source_read(self, count):
-        return await self.reader.read(count)
+        data = await self.reader.read(count)
+        self.total_transported += len(data)
+        return data
 
     async def destination_read(self, count):
-        return await self.dst_reader.read(count)
+        data = await self.dst_reader.read(count)
+        self.total_transported += len(data)
+        return data
 
     async def source_write(self, data):
+        self.total_transported += len(data)
         self.writer.write(data)
         await self.writer.drain()
 
     async def destination_write(self, data):
+        self.total_transported += len(data)
         self.dst_writer.write(data)
         await self.dst_writer.drain()
 
@@ -115,11 +122,11 @@ class ProxyConnection:
     async def authenticate(self, methods: Set[Method]) -> None:
         if Method.user_pass in methods and self.config.username and self.config.password:
             await self.use_auth_method(Method.user_pass)
-            log.info("Using username / password authentication")
+            log.debug("Using username / password authentication")
             await self.check_credentials()
         elif Method.no_auth in methods and not self.config.username and not self.config.password:
             await self.use_auth_method(Method.no_auth)
-            log.info("Using no authentication method")
+            log.debug("Using no authentication method")
         else:
             log.error("No usable auth methods found for given config")
             await self.use_auth_method(Method.no_acceptable_methods)
@@ -127,7 +134,7 @@ class ProxyConnection:
 
     @staticmethod
     async def validate_request_data(connection_info) -> None:
-        log.info("Validating %s", connection_info.address)
+        log.debug("Validating %s", connection_info.address)
 
     async def process_request(self) -> None:
         try:
@@ -140,7 +147,7 @@ class ProxyConnection:
             log.error("Error during client handshake: %r", e)
             await self.close_all()
             return
-        log.info(
+        log.debug(
             "Got host data: %r:%r and command %r",
             connection_info.address,
             connection_info.port,
@@ -148,6 +155,8 @@ class ProxyConnection:
         )
         if connection_info.command is Command.connect:
             await self.handle_connect(connection_info)
+        elif connection_info.command is Command.udp:
+            await self.handle_udp(connection_info)
         else:
             await self.send_command_reply(connection_info, CommandReplyStatus.command_not_supported)
             await self.close_all()
@@ -181,6 +190,9 @@ class ProxyConnection:
     @property
     def src_address(self) -> str:
         return self.writer.get_extra_info("peername")
+
+    async def handle_udp(self, connection_info: ConnectionInfo) -> None:
+        pass
 
     async def handle_connect(self, connection_info: ConnectionInfo) -> None:
         # connect
@@ -329,7 +341,7 @@ class ProxyConnection:
             raise HandshakeError(f"Invalid address type: {data[3]}") from e
         # ipv4
         if address_type is AddressType.ipv4:
-            log.info("Parsing IPV4 addr type")
+            log.debug("Parsing IPV4 addr type")
             address_bytes = await self.source_read(4)
             if len(address_bytes) < 4:
                 raise HandshakeError("IPV4 bytes not fully read")
@@ -339,7 +351,7 @@ class ProxyConnection:
                 raise HandshakeError("port bytes not fully read")
             port, = struct.unpack(">H", port_bytes)
         elif address_type is AddressType.ipv6:
-            log.info("Parsing IPV6 addr type")
+            log.debug("Parsing IPV6 addr type")
             address_bytes = await self.source_read(16)
             if len(address_bytes) < 16:
                 raise HandshakeError("IPV6 bytes not fully read")
@@ -349,7 +361,7 @@ class ProxyConnection:
                 raise HandshakeError("port bytes not fully read")
             port, = struct.unpack(">H", port_bytes)
         elif address_type is AddressType.fqdn:
-            log.info("Parsing FQDN addr type")
+            log.debug("Parsing FQDN addr type")
             address_len_byte = await self.source_read(1)
             self.fail_with_empty(address_len_byte)
             address_len, = struct.unpack("B", address_len_byte)

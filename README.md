@@ -1,17 +1,25 @@
-# asyncio SOCKS5 server
+# Async-io SOCKS5 Server
 
-This is still very much a work in progress but the aim goal is to
+
+![Tests](https://github.com/gabriel-tincu/asucks/workflows/Test%20Suite/badge.svg)
+![Style checks](https://github.com/gabriel-tincu/asucks/workflows/Lint/badge.svg)
+
+This is still a work in progress but among the aim goals are:
 
 - Provide support for:
    1) [x] CONNECT
-   2) [ ]  BIND
+   2) [ ] BIND
    3) [ ] UDP
-- Provide support for:
-   1) [X] no auth
-   2) [X] user+pass auth
-   3) [ ] some custom methods
-- Add unit tests or maybe dockerised systests
+
 - Add a dockerfile plus instructions
+- Bundle what are now functions for starting the server into classes, for embedded use
+- Add graceful shutdown logic for said classes
+
+Currently there is a growing test suite that handles both unit and integration tests (those could use some improvement)
+
+- Provides support for authentication methods:
+   1) no auth
+   2) user + pass auth
 
 ## Usage
 
@@ -25,6 +33,19 @@ In another tab
 $ curl -x socks5h://127.0.0.1:1080 http://www.google.com/
 ```
 
-## Why
+## CLI Options
 
-I had issues with a golang implementation I found online and one thing led to another.
+```shell script
+$ python -m asucks.server --help
+Usage: server.py [OPTIONS]
+
+Options:
+  --port INTEGER      Server port
+  --host TEXT         Network interface
+  --username TEXT     Username for user/pass auth
+  --password TEXT     Password for user/pass auth
+  --validator TEXT    External validator url
+  --cafile TEXT       Remote validator certificate file
+  --log-level TEXT    Log level visible
+  --use-sockets TEXT  Use the base socket server implementation
+```

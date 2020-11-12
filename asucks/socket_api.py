@@ -17,6 +17,7 @@ class SocketProxyConnection(ProxyConnection):
         loop: AbstractEventLoop,
         config: ServerConfig,
     ) -> None:
+        self.total_transported = 0
         self.config = config
         self.destination_socket: Optional[socket.socket] = None
         self.source_socket = source_socket
@@ -29,7 +30,9 @@ class SocketProxyConnection(ProxyConnection):
         return self.source_address[0]
 
     async def source_read(self, count: int) -> bytes:
-        return await self.loop.sock_recv(self.source_socket, count)
+        data = await self.loop.sock_recv(self.source_socket, count)
+        self.total_transported += len(data)
+        return data
 
     def ready_read(self, sock: socket.socket) -> None:
         if sock is self.destination_socket:
@@ -45,9 +48,10 @@ class SocketProxyConnection(ProxyConnection):
         while not self.done.is_set():
             data = src.recv(BUF_SIZE)
             dest.sendall(data)
+            self.total_transported += len(data)
             log.debug("Sent %d bytes from %s to %s", len(data), src_tag, dst_tag)
             if not data:
-                log.info("EOF read from destination %s", src_tag)
+                log.debug("EOF read from destination %s", src_tag)
                 self.loop.remove_reader(src)
                 self.done.set()
                 return
@@ -56,9 +60,11 @@ class SocketProxyConnection(ProxyConnection):
                 return
 
     async def source_write(self, data: bytes):
+        self.total_transported += len(data)
         return await self.loop.sock_sendall(self.source_socket, data)
 
     async def destination_write(self, data: bytes):
+        self.total_transported += len(data)
         return await self.loop.sock_sendall(self.destination_socket, data)
 
     async def close_all(self):
@@ -69,10 +75,10 @@ class SocketProxyConnection(ProxyConnection):
                 sock.close()
             except:
                 pass
-        log.info("Closed both source and destination sockets")
+        log.info("Closed both source and destination sockets, shuffled total %d bytes", self.total_transported)
 
     async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
-        log.info("Creating %r socket", connection_info.address_type)
+        log.debug("Creating %r socket", connection_info.address_type)
         if connection_info.address_type is not AddressType.ipv6:
             self.destination_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         else:
@@ -129,7 +135,7 @@ async def run(
             config=config,
         )
         await conn.process_request()
-        log.info("Done handling requests for %s", address)
+        log.debug("Done handling requests for %s", address)
 
     server = server_bind_socket(host=config.host, port=config.port)
     await run_server(server=server, loop=loop, handler=handler)
