@@ -12,11 +12,11 @@ readme_path = os.path.join(os.path.dirname(__file__), "README.md")
 with open(readme_path, "r") as fp:
     readme_text = fp.read()
 
-version_for_setup_py = "0.2.0-1-g168e270"
+version = "0.2.0-dev"
 
 setup(
     name="asucks",
-    version=version_for_setup_py,
+    version=version,
     zip_safe=False,
     packages=find_packages(exclude=["test"]),
     install_requires=["aiohttp"],
@@ -29,12 +29,12 @@ setup(
         ],
     },
     author="Tincu Gabriel",
-    author_email="tincu.gabriel@gmail.com",
+    author_email="gabri@aiven.io",
     license="MIT",
     platforms=["POSIX"],
     description="asucks",
     long_description=readme_text,
-    url="https://github.com/gabriel-tincu/asucks/",
+    url="https://github.com/aiven/asucks/",
     python_requires=">=3.7.*",
     classifiers=[
         "Intended Audience :: Developers",
