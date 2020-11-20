@@ -149,6 +149,10 @@ class ProxyConnection:
             log.error("Error during client handshake: %r", e)
             await self.close_all()
             return
+        except:  # pylint: disable=bare-except
+            log.exception("Unexpected error encountered")
+            await self.close_all()
+            return
         log.debug(
             "Got host data: %r:%r and command %r",
             connection_info.address,
@@ -249,7 +253,8 @@ class ProxyConnection:
         # |   1 |     1    | 1 to 255 |
         # +-----+----------+----------+
         data = await self.source_read(1)
-        if not data or data != SOCKS5_VER:
+        self.fail_with_empty(data)
+        if data != SOCKS5_VER:
             raise HandshakeError(f"Socks version {data[0]} not supported")
         log.debug("Read version byte")
         data = await self.source_read(1)

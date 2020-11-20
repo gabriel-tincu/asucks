@@ -12,7 +12,7 @@ readme_path = os.path.join(os.path.dirname(__file__), "README.md")
 with open(readme_path, "r") as fp:
     readme_text = fp.read()
 
-version = "0.2.0-dev"
+version = "0.3.0-dev"
 
 setup(
     name="asucks",
