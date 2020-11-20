@@ -18,7 +18,7 @@ setup(
     name="asucks",
     version=version,
     zip_safe=False,
-    packages=find_packages(exclude=["test"]),
+    packages=find_packages(exclude=["tests"]),
     install_requires=["aiohttp"],
     extras_require={},
     dependency_links=[],

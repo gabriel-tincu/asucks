@@ -1,6 +1,6 @@
 
 clean:
-	rm -rf rpm/
+	rm -rf rpm/ dist/ build/
 
 
 .PHONY: pylint
@@ -44,3 +44,4 @@ lint: pre-commit
 .PHONY: rpm
 rpm:
 	python setup.py bdist_rpm
+	rm -rf build/
