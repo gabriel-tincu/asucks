@@ -9,7 +9,6 @@ log = logging.getLogger(__name__)
 
 
 class SocketProxyConnection(ProxyConnection):
-    # pylint: disable=super-init-not-called
     def __init__(
         self,
         source_socket: socket.socket,
@@ -17,8 +16,8 @@ class SocketProxyConnection(ProxyConnection):
         loop: AbstractEventLoop,
         config: ServerConfig,
     ) -> None:
+        super().__init__(config)
         self.total_transported = 0
-        self.config = config
         self.destination_socket: Optional[socket.socket] = None
         self.source_socket = source_socket
         self.source_address = source_address

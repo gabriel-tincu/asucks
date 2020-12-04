@@ -1,6 +1,6 @@
-from asucks.base_server import ServerConfig, StreamServer
+from asucks.base_server import ServerConfig
 from asucks.socket_api import SocketServer
-from typing import Optional
+from asucks.streams_api import StreamServer
 
 import argparse
 import asyncio
@@ -16,10 +16,10 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Network interface")
     parser.add_argument("--username", default=None, help="Username for user/pass auth")
     parser.add_argument("--password", default=None, help="Password for user/pass auth")
-    parser.add_argument("--validator", default=None, help="External validator url")
-    parser.add_argument("--cafile", default=None, help="Remote validator certificate file")
     parser.add_argument("--log-level", default="INFO", help="Log level visible")
-    parser.add_argument("--use-sockets", default=False, action="store_true", help="Use the base socket server implementation")
+    parser.add_argument(
+        "--use-sockets", default=False, action="store_true", help="Use the base socket server implementation"
+    )
     args = parser.parse_args(None)
     logging.basicConfig(level=args.log_level)
 
@@ -28,8 +28,6 @@ def main():
         host=args.host,
         port=args.port,
         password=args.password,
-        validator=args.validator,
-        ca_file=args.cafile,
     )
     asyncio.run(run_main(config=config, use_sockets=args.use_sockets))
 

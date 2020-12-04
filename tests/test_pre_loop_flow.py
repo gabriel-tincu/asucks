@@ -1,11 +1,8 @@
 from asucks.base_server import AddressType, Command, ConnectionInfo, HandshakeError, Method, ProxyConnection, ServerConfig
-from asyncio.streams import StreamReader, StreamWriter
 from contextlib import asynccontextmanager
 from io import BytesIO
 from typing import Optional
 
-import aiohttp
-import asyncio
 import ipaddress
 import json
 import pytest
@@ -13,7 +10,7 @@ import pytest
 pytestmark = pytest.mark.asyncio
 
 
-class TestResponse:
+class MockResponse:
     def __init__(self, fails: bool, authenticates: bool, valid_json: bool):
         self.authenticates = authenticates
         self.ok = fails
@@ -28,7 +25,7 @@ class TestResponse:
         return {"decision": "not_authenticated"}
 
 
-class TestHttpCli:
+class MockHttpCli:
     # pylint: disable=super-init-not-called
     def __init__(self, fails: bool, authenticates: bool, valid_json: bool):
         self.authenticates = authenticates
@@ -39,31 +36,30 @@ class TestHttpCli:
     # pylint: disable=unused-argument
     async def post(self, *args, **kwargs):
         try:
-            yield TestResponse(self.fails, self.authenticates, self.valid_json)
+            yield MockResponse(self.fails, self.authenticates, self.valid_json)
         finally:
             pass
 
 
-class TestConnection(ProxyConnection):
-    # pylint: disable=super-init-not-called
+class MockConnection(ProxyConnection):
+    async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
+        pass
+
+    async def create_proxy_loop(self) -> None:
+        pass
+
     def __init__(
         self,
         source_buff: BytesIO,
-        reader: Optional[StreamReader] = None,
-        writer: Optional[StreamWriter] = None,
         config: Optional[ServerConfig] = None,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
-        http_client: Optional[aiohttp.ClientSession] = None
     ):
         config = config or ServerConfig(
             host="0.0.0.0",
             port=1080,
             username="foo",
             password="foopass",
-            validator=None,
-            ca_file=None,
         )
-        super().__init__(writer=writer, reader=reader, config=config, http_client=http_client, loop=loop)
+        super().__init__(config=config)
         self.source_buff = source_buff
         self.response_data: Optional[bytes] = None
         self.dst_address = "destination-address"
@@ -79,9 +75,6 @@ class TestConnection(ProxyConnection):
     async def source_write(self, data) -> None:
         self.response_data = data
         return None
-
-    async def destination_read(self, count: int) -> bytes:
-        return b""
 
     async def destination_write(self, data) -> None:
         return None
@@ -102,13 +95,13 @@ class TestConnection(ProxyConnection):
 )
 async def test_method_parse(payload):
     payload, expected = payload
-    conn = TestConnection(source_buff=BytesIO(payload))
+    conn = MockConnection(source_buff=BytesIO(payload))
     methods = await conn.get_auth_methods()
     assert methods == expected
 
 
 async def test_process_fails():
-    conn = TestConnection(source_buff=BytesIO(b"\x05\x02\x00"))
+    conn = MockConnection(source_buff=BytesIO(b"\x05\x02\x00"))
     await conn.process_request()
     assert conn.closed
 
@@ -119,7 +112,7 @@ async def test_process_fails():
     b"\x05\x02\x00",
 ])
 async def test_method_fail_parse(payload):
-    conn = TestConnection(source_buff=BytesIO(payload))
+    conn = MockConnection(source_buff=BytesIO(payload))
     with pytest.raises(HandshakeError):
         methods = await conn.get_auth_methods()
         assert not methods
@@ -131,7 +124,7 @@ async def test_method_fail_parse(payload):
 ])
 async def test_auth_passes(payload):
     payload, methods = payload
-    conn = TestConnection(source_buff=BytesIO(payload))
+    conn = MockConnection(source_buff=BytesIO(payload))
     # Drop the user name and pass
     if not payload:
         conn.config.password = None
@@ -150,30 +143,9 @@ async def test_auth_passes(payload):
 )
 async def test_auth_fails(payload):
     payload, methods = payload
-    conn = TestConnection(source_buff=BytesIO(payload))
+    conn = MockConnection(source_buff=BytesIO(payload))
     with pytest.raises(HandshakeError):
         await conn.authenticate(methods)
-
-
-@pytest.mark.parametrize(["request_ok", "auth_ok", "valid_json"], [
-    [True, True, True],
-    [False, True, True],
-    [True, False, True],
-    [True, False, False],
-    [False, False, True],
-])
-async def test_external_auth(request_ok, auth_ok, valid_json):
-    config = ServerConfig(
-        host="0.0.0.0",
-        port=1080,
-        username="foo",
-        password="foopass",
-        validator="some",
-        ca_file="thing",
-    )
-    conn = TestConnection(source_buff=BytesIO(b""), http_client=TestHttpCli(request_ok, auth_ok, valid_json), config=config)
-    resp = await conn.auth_ok("foo", "bar")
-    assert resp is (request_ok and auth_ok and valid_json)
 
 
 @pytest.mark.parametrize(
@@ -199,7 +171,7 @@ async def test_external_auth(request_ok, auth_ok, valid_json):
 )
 async def test_address_info_passes(data):
     payload, resp = data
-    conn = TestConnection(source_buff=BytesIO(payload))
+    conn = MockConnection(source_buff=BytesIO(payload))
     conn_info = await conn.get_destination_info()
     if conn_info.address_type is AddressType.fqdn:
         # drop it for now, as the ips can be unstable
@@ -218,7 +190,7 @@ async def test_address_info_passes(data):
     ]
 )
 async def test_address_info_failure(payload):
-    conn = TestConnection(source_buff=BytesIO(payload))
+    conn = MockConnection(source_buff=BytesIO(payload))
     with pytest.raises(HandshakeError):
         resp = await conn.get_destination_info()
         assert resp is None

@@ -18,10 +18,8 @@ async def test_proxied_http_calls():
         password="foopass",
         host="127.0.0.1",
         port=port,
-        ca_file=None,
-        validator=None,
     )
-    task = loop.create_task(run_main(config, False, "ERROR"))
+    task = loop.create_task(run_main(config, False))
     await asyncio.sleep(0.5)
     connector = ProxyConnector.from_url(f"socks5://foo:foopass@127.0.0.1:{port}")
     async with aiohttp.ClientSession(connector=connector) as session:
@@ -34,10 +32,8 @@ async def test_proxied_http_calls():
         password="foopass",
         host="127.0.0.1",
         port=port,
-        ca_file=None,
-        validator=None,
     )
-    task = loop.create_task(run_main(config, True, "ERROR"))
+    task = loop.create_task(run_main(config, True))
     await asyncio.sleep(0.5)
     connector = ProxyConnector.from_url(f"socks5://foo:foopass@127.0.0.1:{port}")
     async with aiohttp.ClientSession(connector=connector) as session:

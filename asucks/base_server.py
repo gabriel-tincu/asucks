@@ -1,19 +1,14 @@
 """
     http://www.faqs.org/rfcs/rfc1928.html
 """
-from asyncio import AbstractEventLoop, AbstractServer, Event, sleep
-from asyncio.streams import StreamReader, StreamWriter
+from asyncio import Event
 from dataclasses import dataclass
 from typing import Any, Optional, Set, Union
 
-import aiohttp
-import asyncio
 import enum
 import ipaddress
-import json
 import logging
 import socket
-import ssl
 import struct
 
 SOCKS5_VER = b"\x05"
@@ -72,51 +67,22 @@ class ServerConfig:
     port: int
     username: Optional[str]
     password: Optional[str]
-    validator: Optional[str]
-    ca_file: Optional[str]
 
 
 class ProxyConnection:
-    def __init__(
-        self,
-        reader: Optional[StreamReader],
-        writer: Optional[StreamWriter],
-        config: Optional[ServerConfig],
-        loop: Optional[asyncio.AbstractEventLoop] = None,
-        http_client: Optional[aiohttp.ClientSession] = None,
-    ):
-        log.debug("Got reader: %r and writer %r", reader, writer)
-        self.total_transported = 0
+    def __init__(self, config: Optional[ServerConfig]):
         self.config = config
-        self.reader = reader
-        self.writer = writer
-        self.dst_reader: Optional[StreamReader] = None
-        self.dst_writer: Optional[StreamWriter] = None
-        self.http_client = http_client or aiohttp.ClientSession()
-        self.loop = loop or asyncio.get_running_loop()
-        self.done = asyncio.Event()
+        self.done = Event()
         self.dst_address: Optional[str] = None
 
-    async def source_read(self, count):
-        data = await self.reader.read(count)
-        self.total_transported += len(data)
-        return data
+    async def source_read(self, count: int) -> bytes:
+        raise NotImplementedError
 
-    async def destination_read(self, count):
-        data = await self.dst_reader.read(count)
-        self.total_transported += len(data)
-        return data
+    async def source_write(self, data: bytes) -> None:
+        raise NotImplementedError
 
-    async def source_write(self, data):
-        self.total_transported += len(data)
-        self.writer.is_closing()
-        self.writer.write(data)
-        await self.writer.drain()
-
-    async def destination_write(self, data):
-        self.total_transported += len(data)
-        self.dst_writer.write(data)
-        await self.dst_writer.drain()
+    async def destination_write(self, data: bytes) -> None:
+        raise NotImplementedError
 
     async def use_auth_method(self, method: Method) -> None:
         await self.source_write(SOCKS5_VER + method.value)
@@ -188,15 +154,11 @@ class ProxyConnection:
         log.debug("%s: copy loop closed", name)
 
     async def create_remote_conn(self, connection_info: ConnectionInfo) -> None:
-        if connection_info.address_type is AddressType.fqdn:
-            address = connection_info.address
-        else:
-            address = connection_info.address.exploded
-        self.dst_reader, self.dst_writer = await asyncio.open_connection(address, connection_info.port, loop=self.loop)
+        raise NotImplementedError
 
     @property
     def src_address(self) -> str:
-        return self.writer.get_extra_info("peername")
+        raise NotImplementedError
 
     async def handle_udp(self, connection_info: ConnectionInfo) -> None:
         pass
@@ -216,30 +178,11 @@ class ProxyConnection:
         finally:
             await self.close_all()
 
-    async def create_proxy_loop(self):
-        self.loop.create_task(
-            self.copy_data(
-                read=self.source_read, write=self.destination_write, name=f"{self.dst_address} -> {self.src_address}"
-            )
-        )
-        self.loop.create_task(
-            self.copy_data(
-                read=self.destination_read, write=self.source_write, name=f"{self.src_address} -> {self.dst_address}"
-            )
-        )
+    async def create_proxy_loop(self) -> None:
+        raise NotImplementedError
 
-    async def close_all(self):
-        for wr in [self.writer, self.dst_writer]:
-            if wr is None:
-                continue
-            log.debug("Closing connection to %r", wr.get_extra_info("peername"))
-            wr.write_eof()
-            await wr.drain()
-            wr.close()
-            await wr.wait_closed()
-        if self.http_client is not None:
-            await self.http_client.close()
-        log.info("Shuffled a total of %d bytes", self.total_transported)
+    async def close_all(self) -> None:
+        raise NotImplementedError
 
     @staticmethod
     def fail_with_empty(data: Union[bytes, str]):
@@ -306,31 +249,8 @@ class ProxyConnection:
         await self.source_write(b"\x01\x00")
 
     async def auth_ok(self, username: str, password: str) -> bool:
-        if not self.config.validator:
-            log.info("Performing local credential validation")
-            return username == self.config.username and password == self.config.password
-
-        ssl_context = None
-        if self.config.ca_file is not None:
-            ssl_context = ssl.create_default_context(capath=self.config.ca_file)
-        payload = {
-            "type": "external_auth",
-            "username": username,
-            "password": password,
-        }
-        async with self.http_client.post(self.config.validator, json=payload, ssl=ssl_context) as resp:
-            if not resp.ok:
-                log.error("Invalid status code: %r", resp.status)
-                return False
-            try:
-                data = await resp.json()
-                if "decision" not in data or data["decision"] != "authenticated":
-                    log.error("Invalid response")
-                    return False
-            except json.JSONDecodeError:
-                log.error("Response data is not valid json")
-                return False
-        return True
+        log.info("Performing local credential validation")
+        return username == self.config.username and password == self.config.password
 
     async def get_destination_info(self) -> ConnectionInfo:
         # +----+-----+-------+------+----------+----------+
@@ -400,42 +320,3 @@ class ProxyConnection:
         )
         log.debug("Using host %r and port %r", ip_address, port)
         return resp
-
-
-class StreamServer:
-    def __init__(self, config: ServerConfig, loop: AbstractEventLoop, closing: Optional[Event]):
-        self.config = config
-        self.loop = loop
-        self.closing = closing
-        self.server: Optional[AbstractServer] = None
-
-    async def conn_handler(self, reader: StreamReader, writer: StreamWriter) -> None:
-        conn = ProxyConnection(reader=reader, writer=writer, config=self.config)
-        await conn.process_request()
-        log.info("Done processing request")
-
-    async def run_server(self) -> None:
-        self.server = await asyncio.start_server(
-            self.conn_handler, host=self.config.host, port=self.config.port, loop=self.loop
-        )
-        async with self.server:
-            await self.server.start_serving()
-            while not self.closing.is_set():
-                await sleep(0.5)
-        log.info("Closing down server")
-        try:
-            self.server.close()
-        except Exception as e:  # pylint: disable=broad-except
-            log.error("Error closing down server: %r", e)
-
-    def close(self):
-        self.closing.set()
-
-
-def conn_factory(config: ServerConfig):
-    async def proxy(reader: StreamReader, writer: StreamWriter) -> None:
-        conn = ProxyConnection(reader=reader, writer=writer, config=config)
-        await conn.process_request()
-        log.info("Done processing request")
-
-    return proxy

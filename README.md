@@ -1,4 +1,4 @@
-# Async-io SOCKS5 Server
+# Asyncio SOCKS5 Server
 
 
 ![Tests](https://github.com/gabriel-tincu/asucks/workflows/Test%20Suite/badge.svg)
@@ -17,7 +17,7 @@ Currently there is a growing test suite that handles both unit and integration t
 
 - Provides support for authentication methods:
    1) no auth
-   2) user + pass auth
+   2) user + password
 
 ## Usage
 
@@ -42,8 +42,11 @@ Options:
   --host TEXT         Network interface
   --username TEXT     Username for user/pass auth
   --password TEXT     Password for user/pass auth
-  --validator TEXT    External validator url
-  --cafile TEXT       Remote validator certificate file
   --log-level TEXT    Log level visible
   --use-sockets TEXT  Use the base socket server implementation
 ```
+
+## Contributing
+
+I'm using [Poetry](https://python-poetry.org) for dependency management. PR's are welcome
+as well as feature requests
