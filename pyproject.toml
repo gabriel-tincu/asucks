@@ -6,15 +6,16 @@ authors = ["Gabriel Tincu <gabi@aiven.io>"]
 
 [tool.poetry.dependencies]
 python = "^3.7"
-coverage = "^5.3"
 
 [tool.poetry.dev-dependencies]
+coverage = "^5.3"
 pre-commit = "2.8.2"
 pylint = "^2.6.0"
 pytest = "6.1.2"
 pytest-asyncio = "^0.14.0"
 aiohttp-socks = "^0.5.5"
 pytest-cov = "^2.10.1"
+mypy = "^0.790"
 
 [tool.poetry.scripts]
 sproxy = "asucks.server:main"

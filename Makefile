@@ -34,6 +34,9 @@ pre-commit: $(GENERATED)
 .PHONY: lint
 lint: pre-commit
 
+.PHONY: typecheck
+typecheck:
+	mypy -m asucks
 
 .PHONY: rpm
 rpm:
@@ -41,5 +44,5 @@ rpm:
 	rm -rf build/
 
 .PHONY: test
-test: lint
+test: lint typecheck
 	pytest -s tests/

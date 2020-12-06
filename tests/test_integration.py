@@ -1,8 +1,8 @@
 from aiohttp_socks import ProxyConnector
 from asucks.base_server import ServerConfig
 from asucks.server import run_main
-from asucks.streams_api import StreamServer
 from asucks.socket_api import SocketServer
+from asucks.streams_api import StreamServer
 
 import aiohttp
 import asyncio

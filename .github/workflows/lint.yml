@@ -16,5 +16,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Run checks
+      - name: Run lint checks
         run: make lint
+
+      - name: Run type checks
+        run: make typecheck

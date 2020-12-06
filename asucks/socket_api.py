@@ -1,5 +1,5 @@
 from asucks.base_server import AddressType, BUF_SIZE, ConnectionInfo, ProxyConnection, ServerConfig
-from asyncio import AbstractEventLoop, Event, CancelledError
+from asyncio import AbstractEventLoop, CancelledError, Event
 from typing import Optional
 
 import logging
