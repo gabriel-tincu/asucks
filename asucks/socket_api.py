@@ -1,5 +1,5 @@
 from asucks.base_server import AddressType, BUF_SIZE, ConnectionInfo, ProxyConnection, ServerConfig
-from asyncio import AbstractEventLoop, Event
+from asyncio import AbstractEventLoop, Event, CancelledError
 from typing import Optional
 
 import logging
@@ -97,8 +97,9 @@ class SocketServer:
     def __init__(self, config: ServerConfig, loop: AbstractEventLoop, closing: Optional[Event] = None):
         self.config = config
         self.loop = loop
-        self.closing = closing or Event()
-        self.server: Optional[socket] = None
+        self.running: bool = False
+        self.closing: Event = closing or Event()
+        self.listen_sock: Optional[socket] = None
 
     def bind(self):
         # pylint: disable=no-member
@@ -111,16 +112,21 @@ class SocketServer:
         return sock
 
     async def run_server(self) -> None:
-        self.server = self.bind()
-        while not self.closing.is_set():
-            client, address = await self.loop.sock_accept(self.server)
-            client.setblocking(False)
-            log.info("Handling connection from %r", address)
-            self.loop.create_task(self.conn_handler(client, address))
+        self.listen_sock = self.bind()
+        self.running = True
+        try:
+            while not self.closing.is_set():
+                client, address = await self.loop.sock_accept(self.listen_sock)
+                client.setblocking(False)
+                log.info("Handling connection from %r", address)
+                self.loop.create_task(self.conn_handler(client, address))
+        except CancelledError:
+            log.info("Server task canceled")
         log.info("Server closing down")
-        if self.server:
+        self.running = False
+        if self.listen_sock:
             try:
-                self.server.close()
+                self.listen_sock.close()
             except socket.error as e:
                 log.error("Error closing down server: %r", e)
 

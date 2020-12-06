@@ -82,10 +82,11 @@ class StreamsProxyConnection(ProxyConnection):
 
 
 class StreamServer:
-    def __init__(self, config: ServerConfig, loop: AbstractEventLoop, closing: Optional[Event]):
+    def __init__(self, config: ServerConfig, loop: AbstractEventLoop, closing: Optional[Event] = None):
         self.config = config
         self.loop = loop
-        self.closing = closing
+        self.closing = closing or Event()
+        self.running: bool = False
         self.server: Optional[AbstractServer] = None
 
     async def conn_handler(self, reader: StreamReader, writer: StreamWriter) -> None:
@@ -96,6 +97,7 @@ class StreamServer:
     async def run_server(self) -> None:
         self.server = await start_server(self.conn_handler, host=self.config.host, port=self.config.port)
         async with self.server:
+            self.running = True
             await self.server.start_serving()
             while not self.closing.is_set():
                 await sleep(0.5)
@@ -104,6 +106,8 @@ class StreamServer:
             self.server.close()
         except Exception as e:  # pylint: disable=broad-except
             log.error("Error closing down server: %r", e)
+        finally:
+            self.running = False
 
     def close(self):
         self.closing.set()

@@ -42,7 +42,11 @@ async def run_main(config: ServerConfig, use_sockets: bool):
         log.info("Using stream implementation")
         server_class = StreamServer
     server = server_class(config=config, loop=loop, closing=closing)
-    await server.run_server()
+    try:
+        await server.run_server()
+    except asyncio.CancelledError:
+        server.close()
+        await asyncio.sleep(0.5)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ authors = ["Gabriel Tincu <gabi@aiven.io>"]
 
 [tool.poetry.dependencies]
 python = "^3.7"
+coverage = "^5.3"
 
 [tool.poetry.dev-dependencies]
 pre-commit = "2.8.2"
